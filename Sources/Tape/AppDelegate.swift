@@ -31,6 +31,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.stopRecording()
         }
         refreshStatusItem()
+        NSApp.mainMenu = Self.mainMenu()
+    }
+
+    /// Don't quit halfway through a recording: stop it from the menu bar first.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if case .idle = state { return .terminateNow }
+        NSSound.beep()
+        return .terminateCancel
+    }
+
+    /// The menu bar shown while an editor window is open: Quit, the usual
+    /// editing keys, full screen and window commands.
+    private static func mainMenu() -> NSMenu {
+        func item(_ title: String, _ action: Selector?, _ key: String = "",
+                  _ modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            return item
+        }
+        func menu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+            let top = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            top.submenu = NSMenu(title: title)
+            items.forEach { top.submenu!.addItem($0) }
+            return top
+        }
+        let main = NSMenu()
+        main.addItem(menu("Tape", [
+            item("About Tape", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+            .separator(),
+            item("Hide Tape", #selector(NSApplication.hide(_:)), "h"),
+            item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
+            .separator(),
+            item("Quit Tape", #selector(NSApplication.terminate(_:)), "q"),
+        ]))
+        main.addItem(menu("File", [
+            item("Export…", #selector(EditorWindow.exportClicked), "e"),
+            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+        ]))
+        main.addItem(menu("Edit", [
+            item("Undo", #selector(EditorWindow.undoClicked), "z"),
+            .separator(),
+            item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ]))
+        main.addItem(menu("View", [
+            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+        ]))
+        let window = menu("Window", [
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            item("Zoom", #selector(NSWindow.performZoom(_:))),
+        ])
+        NSApp.windowsMenu = window.submenu
+        main.addItem(window)
+        return main
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

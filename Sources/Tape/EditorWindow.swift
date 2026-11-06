@@ -183,8 +183,9 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
         let header = NSStackView(views: [title, NSView(), captionsToggle, exportButton])
         let tools = NSStackView(views: [fillersButton, undoButton, restoreButton])
-        let editHint = Self.hint("Click a word to jump to it, double-click to fix its caption. Select words and press "
-                                + "Delete to cut them; click ✂︎ to bring them back. Space plays and pauses.")
+        let editHint = Self.hint("Click a word to jump to it. Select words (double-click selects one) and press Delete to "
+                                + "cut them; click ✂︎ to bring them back. Press Return or right-click to fix a caption. "
+                                + "Space plays and pauses.")
         let statusRow = NSStackView(views: [spinner, status, actionButton])
         statusRow.alignment = .centerY
         let sidebar = NSStackView(views: [header, tools, editHint, statusRow, scroll])
@@ -479,7 +480,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         window.makeFirstResponder(transcriptView)
     }
 
-    @objc private func undoClicked() { undo() }
+    @objc func undoClicked() { undo() }
 
     private func undo() {
         guard let previous = undoStack.popLast() else { return }
@@ -588,7 +589,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
     // MARK: Export
 
-    @objc private func exportClicked() {
+    @objc func exportClicked() {
         guard let timeline, !exporting else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
@@ -657,8 +658,8 @@ extension NSAttributedString.Key {
     static let cutWords = NSAttributedString.Key("TapeCutWords")
 }
 
-/// Transcript text: click a word to jump to it, double-click (or Return) to
-/// fix it, select words and press Delete to cut them, click ✂︎ to bring cut
+/// Transcript text: click a word to jump to it, Return (or right-click) to
+/// fix its caption, select words and press Delete to cut them, click ✂︎ to bring cut
 /// words back, Space to play or pause, ⌘Z to undo.
 private final class TranscriptTextView: NSTextView {
     var onClickWord: ((Int) -> Void)?
@@ -674,14 +675,36 @@ private final class TranscriptTextView: NSTextView {
             onRestore?(cut)
             return
         }
-        if event.clickCount == 2, let word = attribute(.wordIndex, at: point) as? Int {
-            onEdit?([word])
-            return
-        }
         // Let the text view track a drag-selection; a plain click seeks.
         super.mouseDown(with: event)
         guard selectedRange().length == 0, let word = attribute(.wordIndex, at: point) as? Int else { return }
         onClickWord?(word)
+    }
+
+    /// Right-click: cut or fix the selected words (or the word clicked).
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        if let word = attribute(.wordIndex, at: point) as? Int, !selectedWords().contains(word) {
+            selectWord(word)
+        }
+        let words = selectedWords()
+        guard !words.isEmpty else { return nil }
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(words.count == 1 ? "Cut This Word" : "Cut These Words") { [weak self] in
+            self?.onDelete?(words)
+        })
+        menu.addItem(ClosureMenuItem("Fix Caption Text…") { [weak self] in self?.onEdit?(words) })
+        return menu
+    }
+
+    private func selectWord(_ index: Int) {
+        guard let storage = textStorage else { return }
+        storage.enumerateAttribute(.wordIndex, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if value as? Int == index {
+                setSelectedRange(range)
+                stop.pointee = true
+            }
+        }
     }
 
     /// The attribute of the character under the point (or just before it).
@@ -715,7 +738,7 @@ private final class TranscriptTextView: NSTextView {
         }
     }
 
-    private func selectedWords() -> [Int] {
+    func selectedWords() -> [Int] {
         guard let storage = textStorage else { return [] }
         var words: [Int] = []
         for value in selectedRanges {
@@ -759,4 +782,18 @@ private final class CaptionLabel: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+}
+
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(_ title: String, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func fire() { handler() }
 }
