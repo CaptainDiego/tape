@@ -76,7 +76,7 @@ final class Settings {
     }
 
     var bubbleShape: BubbleShape {
-        get { BubbleShape(rawValue: defaults.string(forKey: "bubbleShape") ?? "") ?? .circle }
+        get { BubbleShape(rawValue: defaults.string(forKey: "bubbleShape") ?? "") ?? .roundedSquare }
         set { defaults.set(newValue.rawValue, forKey: "bubbleShape") }
     }
 

@@ -88,26 +88,26 @@ private final class DraggableView: NSView {
 }
 
 enum BubbleShape: String, CaseIterable {
-    case circle, roundedRectangle
+    case roundedSquare, circle
 
     var title: String {
         switch self {
         case .circle: "Circle"
-        case .roundedRectangle: "Rounded Rectangle"
+        case .roundedSquare: "Rounded Square"
         }
     }
 
     var size: NSSize {
         switch self {
         case .circle: NSSize(width: 200, height: 200)
-        case .roundedRectangle: NSSize(width: 300, height: 225)
+        case .roundedSquare: NSSize(width: 220, height: 220)
         }
     }
 
     var cornerRadius: CGFloat {
         switch self {
         case .circle: size.width / 2
-        case .roundedRectangle: 24
+        case .roundedSquare: 44
         }
     }
 }
