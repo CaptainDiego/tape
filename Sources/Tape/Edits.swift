@@ -1,13 +1,48 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-/// What the user cut from a recording. The video file itself is never
+/// What the user changed in a recording. The video file itself is never
 /// changed; these edits are saved next to it as "<name>.edits.json" and
-/// applied at playback time (and, later, at export).
+/// applied at playback and export.
 struct Edits: Codable, Equatable {
     var deletedWords: Set<Int> = []
     var trimStart: TimeInterval?
     var trimEnd: TimeInterval?
+    /// Sections cut out on the trim bar, in source time.
+    var cuts: [Cut] = []
+    /// Words whose caption text the user fixed. An empty string means the
+    /// word was merged into the one before it (the video isn't cut).
+    var corrections: [Int: String] = [:]
+
+    struct Cut: Codable, Equatable {
+        var start: TimeInterval
+        var end: TimeInterval
+    }
+
+    init() {}
+
+    /// Tolerates sidecars written by older versions, which lack some keys.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deletedWords = try c.decodeIfPresent(Set<Int>.self, forKey: .deletedWords) ?? []
+        trimStart = try c.decodeIfPresent(TimeInterval.self, forKey: .trimStart)
+        trimEnd = try c.decodeIfPresent(TimeInterval.self, forKey: .trimEnd)
+        cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
+        corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
+    }
+
+    /// True if the word is cut from the video, by deleting it in the
+    /// transcript or by cutting a section on the trim bar.
+    func isRemoved(_ i: Int, in words: [Word]) -> Bool {
+        if deletedWords.contains(i) { return true }
+        let middle = (words[i].start + words[i].end) / 2
+        return cuts.contains { middle >= $0.start && middle <= $0.end }
+    }
+
+    /// The word as it should read in captions, after the user's fixes.
+    func text(of i: Int, in words: [Word]) -> String {
+        corrections[i] ?? words[i].text
+    }
 
     static func sidecarURL(for video: URL) -> URL {
         video.deletingPathExtension().appendingPathExtension("edits.json")
@@ -55,34 +90,50 @@ struct Timeline {
 
     let pieces: [Piece]
     let sourceDuration: TimeInterval
-    /// Stretches removed by deleting words (not counting the trimmed ends).
-    let wordCuts: [ClosedRange<TimeInterval>]
+    /// Stretches removed from the middle (deleted words and sections cut on
+    /// the trim bar), merged and sorted. Not counting the trimmed ends.
+    let middleCuts: [ClosedRange<TimeInterval>]
     var duration: TimeInterval { pieces.last.map { $0.playbackStart + $0.length } ?? 0 }
     var isUncut: Bool { pieces.count == 1 && pieces[0].sourceStart <= 0.001 && pieces[0].sourceEnd >= sourceDuration - 0.001 }
 
     init(edits: Edits, words: [Word], sourceDuration: TimeInterval) {
         self.sourceDuration = sourceDuration
-        var cuts: [(TimeInterval, TimeInterval)] = []
-        if let start = edits.trimStart, start > 0 { cuts.append((0, start)) }
-        if let end = edits.trimEnd, end < sourceDuration { cuts.append((end, sourceDuration)) }
-        let trimCount = cuts.count
+        var middle: [(TimeInterval, TimeInterval)] = []
 
-        // Each run of deleted words becomes one cut, running up to just before
-        // the next kept word so the gap after them goes too.
+        // Each run of deleted words becomes one cut that also takes the
+        // pause around it: from shortly after the previous kept word up to
+        // just before the next one, so no "um"-shaped gap is left behind.
         let deleted = edits.deletedWords.filter { words.indices.contains($0) }.sorted()
         var i = 0
         while i < deleted.count {
             var j = i
             while j + 1 < deleted.count, deleted[j + 1] == deleted[j] + 1 { j += 1 }
             let first = deleted[i], last = deleted[j]
+            let leadIn = first > 0 ? words[first - 1].end + 0.08 : 0
+            let start = min(words[first].start, max(leadIn, words[first].start - 0.3))
             let end = last + 1 < words.count
                 ? max(words[last].end, words[last + 1].start - 0.05)
                 : words[last].end + 0.1
-            cuts.append((words[first].start, min(end, sourceDuration)))
+            middle.append((max(start, 0), min(end, sourceDuration)))
             i = j + 1
         }
+        for cut in edits.cuts {
+            middle.append((max(cut.start, 0), min(cut.end, sourceDuration)))
+        }
 
-        wordCuts = cuts.dropFirst(trimCount).map { $0.0...max($0.0, $0.1) }
+        var merged: [ClosedRange<TimeInterval>] = []
+        for (start, end) in middle.sorted(by: { $0.0 < $1.0 }) where end > start {
+            if let last = merged.last, start <= last.upperBound + 0.04 {
+                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, end)
+            } else {
+                merged.append(start...end)
+            }
+        }
+        middleCuts = merged
+
+        var cuts = merged.map { ($0.lowerBound, $0.upperBound) }
+        if let start = edits.trimStart, start > 0 { cuts.append((0, start)) }
+        if let end = edits.trimEnd, end < sourceDuration { cuts.append((end, sourceDuration)) }
 
         // Keep whatever the cuts leave, skipping slivers too short to matter.
         var pieces: [Piece] = []
@@ -131,9 +182,10 @@ struct Timeline {
     func keptWords(_ words: [Word], edits: Edits) -> [Word] {
         words.indices.compactMap { i in
             let word = words[i]
-            guard !edits.deletedWords.contains(i), isKept(word.start) else { return nil }
+            let text = edits.text(of: i, in: words)
+            guard !text.isEmpty, !edits.isRemoved(i, in: words), isKept(word.start) else { return nil }
             let start = playbackTime(atSource: word.start)
-            return Word(text: word.text, start: start, end: max(start, playbackTime(atSource: word.end)))
+            return Word(text: text, start: start, end: max(start, playbackTime(atSource: word.end)))
         }
     }
 

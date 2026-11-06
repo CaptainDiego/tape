@@ -2,9 +2,10 @@
 import AppKit
 
 /// An iPhone-style trim bar: a strip of thumbnails with a yellow frame whose
-/// two handles you drag to trim the start and end. Parts cut from the
-/// transcript show as darkened stripes. Clicking or dragging elsewhere scrubs.
-/// All times are in the original recording ("source" time).
+/// two handles you drag to trim the start and end. Dragging across the strip
+/// selects a section (to cut it); a click moves the playhead. Cut sections
+/// show as dark red stripes. All times are in the original recording
+/// ("source" time).
 @MainActor
 final class TrimBar: NSView {
     var duration: TimeInterval = 0 { didSet { needsDisplay = true } }
@@ -12,14 +13,30 @@ final class TrimBar: NSView {
     var trimEnd: TimeInterval = 0 { didSet { needsDisplay = true } }
     var cuts: [ClosedRange<TimeInterval>] = [] { didSet { needsDisplay = true } }
     var playhead: TimeInterval = 0 { didSet { if oldValue != playhead { needsDisplay = true } } }
+    var selection: ClosedRange<TimeInterval>? {
+        didSet {
+            guard selection != oldValue else { return }
+            needsDisplay = true
+            onSelectionChange?(selection)
+        }
+    }
 
     /// Called once when the user lets go of a handle.
     var onTrim: ((TimeInterval, TimeInterval) -> Void)?
     var onScrub: ((TimeInterval) -> Void)?
+    /// A click without dragging.
+    var onClick: ((TimeInterval) -> Void)?
+    var onSelectionChange: ((ClosedRange<TimeInterval>?) -> Void)?
+    var onDelete: (() -> Void)?
+    var onPlayPause: (() -> Void)?
 
     private var thumbnails: [NSImage] = []
     private var dragging: Handle?
-    private enum Handle { case start, end, scrub }
+    private var anchor: (x: CGFloat, time: TimeInterval) = (0, 0)
+    private var didDrag = false
+    private enum Handle { case start, end, select }
+
+    override var acceptsFirstResponder: Bool { true }
 
     private let handleWidth: CGFloat = 14
     private let minimumLength: TimeInterval = 0.5
@@ -95,6 +112,18 @@ final class TrimBar: NSView {
         NSColor.black.withAlphaComponent(0.6).setFill()
         NSRect(x: strip.minX, y: strip.minY, width: x(for: trimStart) - strip.minX, height: strip.height).fill()
         NSRect(x: x(for: trimEnd), y: strip.minY, width: strip.maxX - x(for: trimEnd), height: strip.height).fill()
+
+        // The selected section: brightened, with a white outline.
+        if let selection {
+            let r = NSRect(x: x(for: selection.lowerBound), y: strip.minY,
+                           width: max(x(for: selection.upperBound) - x(for: selection.lowerBound), 2), height: strip.height)
+            NSColor.white.withAlphaComponent(0.25).setFill()
+            r.fill()
+            NSColor.white.setStroke()
+            let outline = NSBezierPath(rect: r.insetBy(dx: 1, dy: 1))
+            outline.lineWidth = 2
+            outline.stroke()
+        }
         NSGraphicsContext.restoreGraphicsState()
 
         // Yellow frame with a handle on each side.
@@ -138,14 +167,17 @@ final class TrimBar: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
         if abs(point.x - (x(for: trimStart) - handleWidth / 2)) <= handleWidth {
             dragging = .start
         } else if abs(point.x - (x(for: trimEnd) + handleWidth / 2)) <= handleWidth {
             dragging = .end
         } else {
-            dragging = .scrub
-            onScrub?(time(for: point.x))
+            dragging = .select
+            didDrag = false
+            anchor = (point.x, time(for: point.x))
+            onScrub?(anchor.time)
         }
     }
 
@@ -156,17 +188,41 @@ final class TrimBar: NSView {
             trimStart = min(max(time(for: point.x + handleWidth / 2), 0), trimEnd - minimumLength)
         case .end:
             trimEnd = max(min(time(for: point.x - handleWidth / 2), duration), trimStart + minimumLength)
-        case .scrub:
-            onScrub?(time(for: point.x))
+        case .select:
+            if abs(point.x - anchor.x) > 3 { didDrag = true }
+            guard didDrag else { return }
+            let now = time(for: point.x)
+            selection = min(anchor.time, now)...max(anchor.time, now)
+            onScrub?(now)
         case nil: break
         }
     }
 
     override func mouseUp(with event: NSEvent) {
-        if dragging == .start || dragging == .end {
+        switch dragging {
+        case .start, .end:
             onTrim?(trimStart, trimEnd)
             window?.invalidateCursorRects(for: self)
+        case .select:
+            if let s = selection, s.upperBound - s.lowerBound < 0.1 { selection = nil }
+            if !didDrag {
+                selection = nil
+                onClick?(anchor.time)
+            }
+        case nil: break
         }
         dragging = nil
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else {
+            return super.keyDown(with: event)
+        }
+        switch event.keyCode {
+        case 51, 117: onDelete?()        // Delete, Forward Delete
+        case 49: onPlayPause?()          // Space
+        case 53: selection = nil         // Esc
+        default: super.keyDown(with: event)
+        }
     }
 }

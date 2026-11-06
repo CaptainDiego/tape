@@ -27,10 +27,14 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
+    private let cutButton = NSButton(title: "Cut Section", target: nil, action: nil)
+    private var editPopover: NSPopover?
+    private var editingWords: [Int] = []
 
     private var transcript: Transcript?
     private var segments: [Range<Int>] = []
-    private var wordRanges: [NSRange] = []
+    /// Where each visible word sits in the transcript text.
+    private var wordRanges: [Int: NSRange] = [:]
     private var edits: Edits
     private var undoStack: [Edits] = []
     private var sourceDuration: TimeInterval?
@@ -105,8 +109,16 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             new.trimEnd = end < duration - 0.01 ? end : nil
             self.apply(new)
         }
-        let trimHint = Self.hint("Drag the yellow handles to trim the start and end.")
-        let left = NSStackView(views: [playerView, trimBar, trimHint])
+        trimBar.onClick = { [weak self] source in self?.selectCut(at: source) }
+        trimBar.onSelectionChange = { [weak self] _ in self?.updateButtons() }
+        trimBar.onDelete = { [weak self] in self?.cutOrRestoreSelection() }
+        trimBar.onPlayPause = { [weak self] in self?.playPause() }
+        let trimHint = Self.hint("Drag the yellow handles to trim the ends. Drag across the strip to select a section "
+                                 + "and press Delete to cut it. Click a red section to select it and restore it.")
+        trimHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let trimRow = NSStackView(views: [trimHint, cutButton])
+        trimRow.alignment = .top
+        let left = NSStackView(views: [playerView, trimBar, trimRow])
         left.orientation = .vertical
         left.spacing = 6
         left.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 10, right: 0)
@@ -116,6 +128,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             trimBar.leadingAnchor.constraint(equalTo: left.leadingAnchor, constant: 12),
             trimBar.trailingAnchor.constraint(equalTo: left.trailingAnchor, constant: -12),
             trimBar.heightAnchor.constraint(equalToConstant: 52),
+            trimRow.leadingAnchor.constraint(equalTo: left.leadingAnchor, constant: 12),
+            trimRow.trailingAnchor.constraint(equalTo: left.trailingAnchor, constant: -12),
         ])
         playerView.setContentHuggingPriority(.defaultLow, for: .vertical)
 
@@ -127,6 +141,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         transcriptView.onClickWord = { [weak self] i in self?.seek(toWord: i) }
         transcriptView.onDelete = { [weak self] words in self?.toggleDeleted(words) }
         transcriptView.onUndo = { [weak self] in self?.undo() }
+        transcriptView.onRestore = { [weak self] words in self?.restore(words) }
+        transcriptView.onEdit = { [weak self] words in self?.editWords(words) }
         transcriptView.onPlayPause = { [weak self] in self?.playPause() }
         let scroll = NSScrollView()
         scroll.documentView = transcriptView
@@ -144,11 +160,12 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         captionsToggle.state = .on
         for (button, action) in [(captionsToggle, #selector(toggleCaptions)), (fillersButton, #selector(removeFillers)),
                                  (undoButton, #selector(undoClicked)), (restoreButton, #selector(restoreAll)),
-                                 (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked))] {
+                                 (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked)),
+                                 (cutButton, #selector(cutOrRestoreSelection))] {
             button.target = self
             button.action = action
         }
-        for button in [fillersButton, undoButton, restoreButton, exportButton, actionButton] {
+        for button in [fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
         }
@@ -166,7 +183,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
         let header = NSStackView(views: [title, NSView(), captionsToggle, exportButton])
         let tools = NSStackView(views: [fillersButton, undoButton, restoreButton])
-        let editHint = Self.hint("Select words and press Delete to cut them. Space plays and pauses.")
+        let editHint = Self.hint("Click a word to jump to it, double-click to fix its caption. Select words and press "
+                                + "Delete to cut them; click ✂︎ to bring them back. Space plays and pauses.")
         let statusRow = NSStackView(views: [spinner, status, actionButton])
         statusRow.alignment = .centerY
         let sidebar = NSStackView(views: [header, tools, editHint, statusRow, scroll])
@@ -250,27 +268,6 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         segments = transcript.segments
         highlighted = nil
         setStatus(transcript.words.isEmpty ? "No speech found in this recording." : nil, busy: false)
-
-        // One paragraph per caption line, each starting with its timestamp.
-        let text = NSMutableAttributedString()
-        let stamp: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
-            .foregroundColor: NSColor.tertiaryLabelColor, .paragraphStyle: Self.paragraph,
-        ]
-        wordRanges = Array(repeating: NSRange(location: 0, length: 0), count: transcript.words.count)
-        for segment in segments {
-            text.append(NSAttributedString(string: Self.timestamp(transcript.words[segment.lowerBound].start) + "   ",
-                                           attributes: stamp))
-            for i in segment {
-                wordRanges[i] = NSRange(location: text.length, length: (transcript.words[i].text as NSString).length)
-                text.append(NSAttributedString(string: transcript.words[i].text,
-                                               attributes: [.wordIndex: i, .paragraphStyle: Self.paragraph]))
-                text.append(NSAttributedString(string: i == segment.upperBound - 1 ? "\n" : " ",
-                                               attributes: [.paragraphStyle: Self.paragraph,
-                                                            .font: NSFont.systemFont(ofSize: 14)]))
-            }
-        }
-        transcriptView.textStorage?.setAttributedString(text)
         rebuild()
     }
 
@@ -281,34 +278,67 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         return p
     }()
 
-    /// Colors each word for its state: cut (struck through), trimmed off
-    /// (faded), filler (orange) or normal.
-    private func styleWords() {
-        guard let transcript, let storage = transcriptView.textStorage, storage.length > 0 else { return }
-        let start = edits.trimStart ?? 0
-        let end = edits.trimEnd ?? .infinity
-        storage.beginEditing()
-        for (i, word) in transcript.words.enumerated() {
-            let range = wordRanges[i]
-            var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .wordIndex: i,
-                                                             .paragraphStyle: Self.paragraph]
-            if edits.deletedWords.contains(i) {
-                attributes[.foregroundColor] = NSColor.tertiaryLabelColor
-                attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
-                attributes[.strikethroughColor] = NSColor.systemRed.withAlphaComponent(0.7)
-            } else if word.start < start || word.start >= end {
-                attributes[.foregroundColor] = NSColor.tertiaryLabelColor
-            } else if Fillers.isFiller(word.text) {
-                attributes[.foregroundColor] = NSColor.systemOrange
-            } else {
-                attributes[.foregroundColor] = NSColor.labelColor
+    /// One paragraph per caption line, starting with its time in the edited
+    /// video. Removed words disappear, leaving a ✂︎ you can click to bring
+    /// them back; trimmed-off words are faded and fillers are orange.
+    private func renderTranscript() {
+        guard let transcript, let timeline, let storage = transcriptView.textStorage else { return }
+        let words = transcript.words
+        let trimStart = edits.trimStart ?? 0, trimEnd = edits.trimEnd ?? .infinity
+        let base: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .paragraphStyle: Self.paragraph]
+        let stamp: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.tertiaryLabelColor, .paragraphStyle: Self.paragraph,
+        ]
+        let text = NSMutableAttributedString()
+        wordRanges = [:]
+        for segment in segments {
+            let firstKept = segment.first { !edits.isRemoved($0, in: words) }
+            let time = firstKept.map { Self.timestamp(timeline.playbackTime(atSource: words[$0].start)) } ?? "  –  "
+            text.append(NSAttributedString(string: time + "   ", attributes: stamp))
+            var i = segment.lowerBound
+            var needsSpace = false
+            while i < segment.upperBound {
+                if edits.isRemoved(i, in: words) {
+                    var j = i
+                    while j + 1 < segment.upperBound, edits.isRemoved(j + 1, in: words) { j += 1 }
+                    if needsSpace { text.append(NSAttributedString(string: " ", attributes: base)) }
+                    var marker = base
+                    marker[.cutWords] = Array(i...j)
+                    marker[.foregroundColor] = NSColor.systemRed.withAlphaComponent(0.6)
+                    marker[.font] = NSFont.systemFont(ofSize: 11)
+                    marker[.toolTip] = "Cut: " + (i...j).map { edits.text(of: $0, in: words) }.joined(separator: " ")
+                        + "\nClick to bring it back."
+                    text.append(NSAttributedString(string: "✂︎", attributes: marker))
+                    needsSpace = true
+                    i = j + 1
+                    continue
+                }
+                let shown = edits.text(of: i, in: words)
+                if !shown.isEmpty {
+                    if needsSpace { text.append(NSAttributedString(string: " ", attributes: base)) }
+                    var attributes = base
+                    attributes[.wordIndex] = i
+                    if words[i].start < trimStart || words[i].start >= trimEnd {
+                        attributes[.foregroundColor] = NSColor.tertiaryLabelColor
+                    } else if edits.corrections[i] == nil, Fillers.isFiller(shown) {
+                        attributes[.foregroundColor] = NSColor.systemOrange
+                    } else {
+                        attributes[.foregroundColor] = NSColor.labelColor
+                    }
+                    wordRanges[i] = NSRange(location: text.length, length: (shown as NSString).length)
+                    text.append(NSAttributedString(string: shown, attributes: attributes))
+                    needsSpace = true
+                }
+                i += 1
             }
-            if i == highlighted {
-                attributes[.backgroundColor] = NSColor.controlAccentColor.withAlphaComponent(0.3)
-            }
-            storage.setAttributes(attributes, range: range)
+            text.append(NSAttributedString(string: "\n", attributes: base))
         }
-        storage.endEditing()
+        let selection = transcriptView.selectedRange()
+        storage.setAttributedString(text)
+        if NSMaxRange(selection) <= text.length { transcriptView.setSelectedRange(selection) }
+        highlighted = nil
+        playheadMoved(to: player.currentTime().seconds)
     }
 
     // MARK: Editing
@@ -334,10 +364,119 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func removeFillers() {
-        guard let transcript else { return }
         var new = edits
-        new.deletedWords.formUnion(transcript.words.indices.filter { Fillers.isFiller(transcript.words[$0].text) })
+        new.deletedWords.formUnion(remainingFillers())
         apply(new)
+    }
+
+    private func remainingFillers() -> [Int] {
+        guard let words = transcript?.words else { return [] }
+        return words.indices.filter {
+            edits.corrections[$0] == nil && Fillers.isFiller(words[$0].text) && !edits.isRemoved($0, in: words)
+        }
+    }
+
+    /// Brings back removed words (clicked ✂︎ in the transcript).
+    private func restore(_ indices: [Int]) {
+        guard let words = transcript?.words else { return }
+        var new = edits
+        new.deletedWords.subtract(indices)
+        new.cuts.removeAll { cut in
+            indices.contains { i in (cut.start...cut.end).contains((words[i].start + words[i].end) / 2) }
+        }
+        apply(new)
+    }
+
+    // MARK: Sections
+
+    /// A click on a cut section of the trim bar selects it, ready to restore.
+    private func selectCut(at source: TimeInterval) {
+        if let cut = timeline?.middleCuts.first(where: { $0.contains(source) }) {
+            trimBar.selection = cut
+        }
+    }
+
+    private var selectionIsCut: Bool {
+        guard let selection = trimBar.selection, let timeline else { return false }
+        return timeline.middleCuts.contains {
+            abs($0.lowerBound - selection.lowerBound) < 0.01 && abs($0.upperBound - selection.upperBound) < 0.01
+        }
+    }
+
+    /// Cuts the selected section of the trim bar, or restores it if it's
+    /// already a cut.
+    @objc private func cutOrRestoreSelection() {
+        guard let selection = trimBar.selection else { return }
+        var new = edits
+        if selectionIsCut {
+            new.cuts.removeAll { $0.end > selection.lowerBound && $0.start < selection.upperBound }
+            if let words = transcript?.words {
+                new.deletedWords = new.deletedWords.filter { !selection.contains(words[$0].start) }
+            }
+        } else {
+            new.cuts.append(Edits.Cut(start: selection.lowerBound, end: selection.upperBound))
+        }
+        trimBar.selection = nil
+        apply(new)
+        window.makeFirstResponder(trimBar)
+    }
+
+    // MARK: Fixing captions
+
+    /// Opens a small field over the words to retype them. The new text
+    /// replaces the first word; the others are folded into it, so the
+    /// timing stays and the video isn't cut. Clearing the field cuts them.
+    private func editWords(_ indices: [Int]) {
+        guard let words = transcript?.words, let first = indices.min(), let last = indices.max() else { return }
+        let visible = (first...last).filter { wordRanges[$0] != nil }
+        guard let firstVisible = visible.first, let lastVisible = visible.last,
+              let layout = transcriptView.layoutManager, let container = transcriptView.textContainer
+        else { return }
+        editPopover?.close()
+        editingWords = visible
+
+        let field = NSTextField(string: visible.map { edits.text(of: $0, in: words) }.joined(separator: " "))
+        field.frame = NSRect(x: 10, y: 10, width: 320, height: 24)
+        field.target = self
+        field.action = #selector(commitWordEdit(_:))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 44))
+        content.addSubview(field)
+        let controller = NSViewController()
+        controller.view = content
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        editPopover = popover
+
+        let range = NSUnionRange(wordRanges[firstVisible]!, wordRanges[lastVisible]!)
+        var rect = layout.boundingRect(forGlyphRange: layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil),
+                                       in: container)
+        rect.origin.x += transcriptView.textContainerOrigin.x
+        rect.origin.y += transcriptView.textContainerOrigin.y
+        popover.show(relativeTo: rect, of: transcriptView, preferredEdge: .maxY)
+        popover.contentViewController?.view.window?.makeFirstResponder(field)
+    }
+
+    @objc private func commitWordEdit(_ sender: NSTextField) {
+        guard let words = transcript?.words, let first = editingWords.first else { return }
+        let indices = editingWords
+        editingWords = []
+        editPopover?.close()
+        editPopover = nil
+        let text = sender.stringValue.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        var new = edits
+        if text.isEmpty {
+            new.deletedWords.formUnion(indices)
+        } else {
+            new.corrections[first] = text == words[first].text ? nil : text
+            for i in indices.dropFirst() { new.corrections[i] = "" }
+            // Typing back exactly the original words undoes the fix.
+            if text == indices.map({ words[$0].text }).joined(separator: " ") {
+                for i in indices { new.corrections[i] = nil }
+            }
+        }
+        apply(new)
+        window.makeFirstResponder(transcriptView)
     }
 
     @objc private func undoClicked() { undo() }
@@ -349,7 +488,12 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         rebuild()
     }
 
-    @objc private func restoreAll() { apply(Edits()) }
+    /// Undoes every cut and trim. Caption fixes are kept.
+    @objc private func restoreAll() {
+        var new = Edits()
+        new.corrections = edits.corrections
+        apply(new)
+    }
 
     /// Recomputes the timeline after any change and swaps in the edited
     /// video, keeping the playhead on the same moment of the recording.
@@ -364,8 +508,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         trimBar.duration = duration
         trimBar.trimStart = edits.trimStart ?? 0
         trimBar.trimEnd = edits.trimEnd ?? duration
-        trimBar.cuts = timeline.wordCuts
-        styleWords()
+        trimBar.cuts = timeline.middleCuts
+        renderTranscript()
         updateButtons()
 
         itemGeneration += 1
@@ -383,13 +527,14 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     }
 
     private func updateButtons() {
-        let fillers = transcript.map { t in
-            t.words.indices.filter { Fillers.isFiller(t.words[$0].text) && !edits.deletedWords.contains($0) }.count
-        } ?? 0
+        let fillers = remainingFillers().count
         fillersButton.title = fillers > 0 ? "Remove \(fillers) Filler\(fillers == 1 ? "" : "s")" : "No Fillers"
         fillersButton.isEnabled = fillers > 0
         undoButton.isEnabled = !undoStack.isEmpty
-        restoreButton.isEnabled = edits != Edits()
+        restoreButton.isEnabled = edits.deletedWords.count + edits.cuts.count > 0
+            || edits.trimStart != nil || edits.trimEnd != nil
+        cutButton.title = selectionIsCut ? "Restore Section" : "Cut Section"
+        cutButton.isEnabled = trimBar.selection != nil
         exportButton.isEnabled = timeline != nil && !exporting
     }
 
@@ -420,11 +565,13 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             if let i = current, source > transcript.words[i].end + 0.6 { current = nil }
             if current != highlighted, let storage = transcriptView.textStorage, storage.length > 0 {
                 storage.beginEditing()
-                if let old = highlighted { storage.removeAttribute(.backgroundColor, range: wordRanges[old]) }
-                if let new = current {
+                if let old = highlighted, let range = wordRanges[old] {
+                    storage.removeAttribute(.backgroundColor, range: range)
+                }
+                if let new = current, let range = wordRanges[new] {
                     storage.addAttribute(.backgroundColor, value: NSColor.controlAccentColor.withAlphaComponent(0.3),
-                                         range: wordRanges[new])
-                    if player.rate != 0 { transcriptView.scrollRangeToVisible(wordRanges[new]) }
+                                         range: range)
+                    if player.rate != 0 { transcriptView.scrollRangeToVisible(range) }
                 }
                 storage.endEditing()
                 highlighted = current
@@ -507,27 +654,48 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
 extension NSAttributedString.Key {
     static let wordIndex = NSAttributedString.Key("TapeWordIndex")
+    static let cutWords = NSAttributedString.Key("TapeCutWords")
 }
 
-/// Transcript text: click a word to jump to it, select words and press
-/// Delete to cut them, Space to play or pause, ⌘Z to undo.
+/// Transcript text: click a word to jump to it, double-click (or Return) to
+/// fix it, select words and press Delete to cut them, click ✂︎ to bring cut
+/// words back, Space to play or pause, ⌘Z to undo.
 private final class TranscriptTextView: NSTextView {
     var onClickWord: ((Int) -> Void)?
     var onDelete: (([Int]) -> Void)?
+    var onRestore: (([Int]) -> Void)?
+    var onEdit: (([Int]) -> Void)?
     var onUndo: (() -> Void)?
     var onPlayPause: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let cut = attribute(.cutWords, at: point) as? [Int] {
+            onRestore?(cut)
+            return
+        }
+        if event.clickCount == 2, let word = attribute(.wordIndex, at: point) as? Int {
+            onEdit?([word])
+            return
+        }
         // Let the text view track a drag-selection; a plain click seeks.
         super.mouseDown(with: event)
-        guard selectedRange().length == 0, let storage = textStorage, storage.length > 0 else { return }
-        let point = convert(event.locationInWindow, from: nil)
-        let i = min(max(characterIndexForInsertion(at: point), 0), storage.length - 1)
-        if let word = storage.attribute(.wordIndex, at: i, effectiveRange: nil) as? Int {
-            onClickWord?(word)
-        } else if i > 0, let word = storage.attribute(.wordIndex, at: i - 1, effectiveRange: nil) as? Int {
-            onClickWord?(word)
-        }
+        guard selectedRange().length == 0, let word = attribute(.wordIndex, at: point) as? Int else { return }
+        onClickWord?(word)
+    }
+
+    /// The attribute of the character under the point (or just before it).
+    private func attribute(_ key: NSAttributedString.Key, at point: NSPoint) -> Any? {
+        guard let storage = textStorage, storage.length > 0, let layout = layoutManager, let container = textContainer
+        else { return nil }
+        let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+        var fraction: CGFloat = 0
+        let glyph = layout.glyphIndex(for: local, in: container, fractionOfDistanceThroughGlyph: &fraction)
+        let glyphRect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+        guard glyphRect.insetBy(dx: -3, dy: -2).contains(local) else { return nil }
+        let i = layout.characterIndexForGlyph(at: glyph)
+        guard i < storage.length else { return nil }
+        return storage.attribute(key, at: i, effectiveRange: nil)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -538,6 +706,8 @@ private final class TranscriptTextView: NSTextView {
             setSelectedRange(NSRange(location: selectedRange().location, length: 0))
         case (49, []):  // Space
             onPlayPause?()
+        case (36, []), (76, []):  // Return, Enter
+            onEdit?(selectedWords())
         case (6, .command):  // ⌘Z
             onUndo?()
         default:
