@@ -16,6 +16,7 @@ echo "==> Assembling bundle"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
+strip -rSTx "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
 
 echo "==> Drawing icon"
 swift "$ROOT/Tools/make-icon.swift" "$APP/Contents/Resources/AppIcon.icns" >/dev/null 2>&1 \

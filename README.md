@@ -10,7 +10,14 @@ A minimal Loom-style screen recorder for macOS, written in native Swift. Recordi
 - Choose the camera shape: circle or rounded rectangle
 - Click the menu bar icon to stop. The recording then opens in a window.
 - **Captions (v0.2):** Parakeet v3 runs on this Mac, using the same model files as Murmur. The transcript sits beside the video: click a word to jump to it, and the current word is highlighted. Captions appear on top of the video. Each transcript is saved as `<name>.transcript.json` next to its video.
-- Testing: `.build/debug/Tape --transcribe <video>` prints the transcript.
+- **Editing (v0.3):** select words in the transcript and press Delete to cut them (press Delete again to restore them). **Remove Fillers** cuts every "um", "uh" or "euh" in one click. Drag the yellow handles on the trim bar to trim the start and end. Captions follow the edits. Nothing touches the original file: the cuts are saved in `<name>.edits.json`.
+- **Export (⌘E):** an H.264 MP4 with the edits applied and the captions burned in (optional), plus `.srt` and `.txt` transcripts.
+- Command line: `Tape --transcribe <video>` prints the transcript; `Tape --export <video> <out.mp4>` renders with the saved edits and captions.
+
+## Privacy and size
+- Everything runs on this Mac. Tape's own code never touches the network. The only network access is the one-time Parakeet model download, and that only happens when you click **Download Model** (it's skipped if Murmur already downloaded the model).
+- Hardened runtime. The only entitlements are camera and microphone; screen recording goes through the standard macOS permission.
+- The app is about 5 MB. The speech model (about 480 MB) lives in `~/Library/Application Support/FluidAudio/Models`, shared with Murmur.
 
 ## Build
 ```
@@ -19,7 +26,6 @@ A minimal Loom-style screen recorder for macOS, written in native Swift. Recordi
 Each install resets Tape's Camera, Microphone and Screen Recording permissions, because ad-hoc builds look like a new app to macOS. Grant them again on the first recording. Screen Recording needs Tape to be relaunched after you grant it.
 
 ## Next
-1. Cutting and trimming (including deleting words in the transcript)
-2. Studio Sound (voice cleanup, like Descript's)
-3. Filler word removal
-4. Playback and export speed
+1. Studio Sound (voice cleanup, like Descript's)
+2. Playback and export speed
+3. Sharing: hosted link with a transcript download

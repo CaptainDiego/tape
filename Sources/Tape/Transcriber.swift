@@ -4,25 +4,27 @@ import FluidAudio
 import Foundation
 
 enum TranscriberError: LocalizedError {
-    case noAudio
+    case noAudio, modelMissing
 
     var errorDescription: String? {
         switch self {
         case .noAudio: "This recording has no audio track (was the microphone set to None?)."
+        case .modelMissing: "The Parakeet speech model isn't on this Mac yet. It's a one-time download of about 480 MB from Hugging Face; after that everything runs offline."
         }
     }
 }
 
 /// Runs Parakeet v3 on this Mac. It loads the same model files Murmur
-/// downloaded, and only goes online if they're missing.
+/// downloaded. Nothing goes online unless the user explicitly asks to
+/// download a missing model.
 actor Transcriber {
     static let shared = Transcriber()
     static let modelName = "parakeet-tdt-0.6b-v3"
 
     private var loading: Task<(AsrManager, Int), Error>?
 
-    func transcribe(_ video: URL) async throws -> Transcript {
-        let (manager, decoderLayers) = try await loadedManager()
+    func transcribe(_ video: URL, allowDownload: Bool = false) async throws -> Transcript {
+        let (manager, decoderLayers) = try await loadedManager(allowDownload: allowDownload)
 
         // FluidAudio reads audio with AVAudioFile, which doesn't open an MP4
         // that also holds video, so pull the audio out first.
@@ -39,7 +41,7 @@ actor Transcriber {
 
     /// Loads the model once. Two windows asking at the same time share the
     /// same load instead of each starting one.
-    private func loadedManager() async throws -> (AsrManager, Int) {
+    private func loadedManager(allowDownload: Bool) async throws -> (AsrManager, Int) {
         if let loading { return try await loading.value }
         let task = Task { () throws -> (AsrManager, Int) in
             let configuration = MLModelConfiguration()
@@ -50,8 +52,10 @@ actor Transcriber {
             if AsrModels.modelsExist(at: directory, version: .v3),
                let local = try? AsrModels.loadLocal(from: directory, version: .v3, configuration: configuration) {
                 models = local
-            } else {
+            } else if allowDownload {
                 models = try await AsrModels.downloadAndLoad(configuration: configuration, version: .v3)
+            } else {
+                throw TranscriberError.modelMissing
             }
             let asr = AsrManager(config: .default)
             try await asr.loadModels(models)
