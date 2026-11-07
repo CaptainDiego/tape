@@ -822,10 +822,13 @@ private final class TranscriptTextView: NSTextView {
         let words = selectedWords()
         guard !words.isEmpty else { return nil }
         let menu = NSMenu()
+        menu.allowsContextMenuPlugIns = false  // no "Services" submenu
+        menu.addItem(ClosureMenuItem(words.count == 1 ? "Rewrite…" : "Rewrite These Words…") { [weak self] in
+            self?.onEdit?(words)
+        })
         menu.addItem(ClosureMenuItem(words.count == 1 ? "Cut This Word" : "Cut These Words") { [weak self] in
             self?.onDelete?(words)
         })
-        menu.addItem(ClosureMenuItem("Fix Caption Text…") { [weak self] in self?.onEdit?(words) })
         return menu
     }
 
