@@ -13,6 +13,8 @@ struct Edits: Codable, Equatable {
     /// Words whose caption text the user fixed. An empty string means the
     /// word was merged into the one before it (the video isn't cut).
     var corrections: [Int: String] = [:]
+    /// Use the Studio Sound version of the audio.
+    var studioSound = false
 
     struct Cut: Codable, Equatable {
         var start: TimeInterval
@@ -29,6 +31,7 @@ struct Edits: Codable, Equatable {
         trimEnd = try c.decodeIfPresent(TimeInterval.self, forKey: .trimEnd)
         cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
         corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
+        studioSound = try c.decodeIfPresent(Bool.self, forKey: .studioSound) ?? false
     }
 
     /// True if the word is cut from the video, by deleting it in the
@@ -163,13 +166,33 @@ struct Timeline {
     }
 
     /// The edited video: the kept pieces of the original, back to back.
-    func editedAsset(from asset: AVURLAsset) async throws -> AVAsset {
-        if isUncut { return asset }
+    /// `audio`, if given, replaces the recording's sound (Studio Sound); it
+    /// must line up with the video from time zero.
+    func editedAsset(from asset: AVURLAsset, audio: AVURLAsset? = nil) async throws -> AVAsset {
+        if isUncut, audio == nil { return asset }
         let composition = AVMutableComposition()
+        var tracks: [(AVAssetTrack, AVMutableCompositionTrack)] = []
+        for (source, type) in [(asset, AVMediaType.video), (audio ?? asset, .audio)] {
+            for track in try await source.loadTracks(withMediaType: type) {
+                guard let copy = composition.addMutableTrack(withMediaType: type,
+                                                             preferredTrackID: kCMPersistentTrackID_Invalid)
+                else { continue }
+                if type == .video { copy.preferredTransform = try await track.load(.preferredTransform) }
+                tracks.append((track, copy))
+            }
+        }
+        var at = CMTime.zero
         for piece in pieces {
             let range = CMTimeRange(start: CMTime(seconds: piece.sourceStart, preferredTimescale: 600),
                                     end: CMTime(seconds: piece.sourceEnd, preferredTimescale: 600))
-            try await composition.insertTimeRange(range, of: asset, at: composition.duration)
+            for (track, copy) in tracks {
+                // A track can be a little shorter than the piece (the mic
+                // starts late, say): insert just the part it has.
+                let part = range.intersection(try await track.load(.timeRange))
+                guard part.duration > .zero else { continue }
+                try copy.insertTimeRange(part, of: track, at: at + (part.start - range.start))
+            }
+            at = at + range.duration
         }
         return composition
     }

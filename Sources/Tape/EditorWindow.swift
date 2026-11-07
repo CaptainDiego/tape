@@ -23,6 +23,10 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     private let spinner = NSProgressIndicator()
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private let captionsToggle = NSButton(checkboxWithTitle: "Captions", target: nil, action: nil)
+    private let studioToggle = NSButton(checkboxWithTitle: "Studio Sound", target: nil, action: nil)
+    /// The Studio Sound audio, once processed.
+    private var studioAudio: AVURLAsset?
+    private var processingStudio = false
     private let fillersButton = NSButton(title: "Remove Fillers", target: nil, action: nil)
     private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
@@ -161,7 +165,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         for (button, action) in [(captionsToggle, #selector(toggleCaptions)), (fillersButton, #selector(removeFillers)),
                                  (undoButton, #selector(undoClicked)), (restoreButton, #selector(restoreAll)),
                                  (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked)),
-                                 (cutButton, #selector(cutOrRestoreSelection))] {
+                                 (cutButton, #selector(cutOrRestoreSelection)),
+                                 (studioToggle, #selector(toggleStudioSound))] {
             button.target = self
             button.action = action
         }
@@ -181,7 +186,9 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         status.maximumNumberOfLines = 5
         status.preferredMaxLayoutWidth = 300
 
-        let header = NSStackView(views: [title, NSView(), captionsToggle, exportButton])
+        studioToggle.toolTip = "Removes background noise and echo and evens out your voice, like a studio mic. "
+            + "Runs on this Mac."
+        let header = NSStackView(views: [title, NSView(), studioToggle, captionsToggle, exportButton])
         let tools = NSStackView(views: [fillersButton, undoButton, restoreButton])
         let editHint = Self.hint("Click a word to jump to it. Select words (double-click selects one) and press Delete to "
                                 + "cut them; click ✂︎ to bring them back. Press Return or right-click to fix a caption. "
@@ -220,6 +227,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
     private func load() {
         trimBar.loadThumbnails(from: asset)
+        if edits.studioSound { prepareStudioSound() }
         Task {
             sourceDuration = (try? await asset.load(.duration).seconds) ?? 0
             rebuild()
@@ -388,6 +396,42 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         apply(new)
     }
 
+    // MARK: Studio Sound
+
+    @objc private func toggleStudioSound() {
+        var new = edits
+        new.studioSound = studioToggle.state == .on
+        apply(new)
+        if new.studioSound { prepareStudioSound() }
+    }
+
+    /// Processes the audio the first time (a few seconds), then plays and
+    /// exports the cleaned-up version.
+    private func prepareStudioSound() {
+        guard studioAudio == nil, !processingStudio else { return }
+        processingStudio = true
+        updateButtons()
+        setStatus("Applying Studio Sound…", busy: true)
+        let file = self.file
+        Task {
+            do {
+                let url = try await StudioSound.render(file) { fraction in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.processingStudio else { return }
+                        self.setStatus("Applying Studio Sound \(Int(fraction * 100))%…", busy: true)
+                    }
+                }
+                studioAudio = AVURLAsset(url: url)
+                setStatus(nil, busy: false)
+            } catch {
+                setStatus("Studio Sound failed: \(error.localizedDescription)", busy: false,
+                          action: ("Try Again", { [weak self] in self?.prepareStudioSound() }))
+            }
+            processingStudio = false
+            rebuild()
+        }
+    }
+
     // MARK: Sections
 
     /// A click on a cut section of the trim bar selects it, ready to restore.
@@ -493,6 +537,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     @objc private func restoreAll() {
         var new = Edits()
         new.corrections = edits.corrections
+        new.studioSound = edits.studioSound
         apply(new)
     }
 
@@ -510,6 +555,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         trimBar.trimStart = edits.trimStart ?? 0
         trimBar.trimEnd = edits.trimEnd ?? duration
         trimBar.cuts = timeline.middleCuts
+        studioToggle.state = edits.studioSound ? .on : .off
+        let audio = edits.studioSound ? studioAudio : nil
         renderTranscript()
         updateButtons()
 
@@ -517,7 +564,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         let generation = itemGeneration
         let asset = self.asset
         Task {
-            guard let edited = try? await timeline.editedAsset(from: asset), generation == itemGeneration else { return }
+            guard let edited = try? await timeline.editedAsset(from: asset, audio: audio),
+                  generation == itemGeneration else { return }
             let wasPlaying = player.rate != 0
             player.replaceCurrentItem(with: AVPlayerItem(asset: edited))
             await player.seek(to: CMTime(seconds: timeline.playbackTime(atSource: sourceNow), preferredTimescale: 600),
@@ -536,7 +584,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             || edits.trimStart != nil || edits.trimEnd != nil
         cutButton.title = selectionIsCut ? "Restore Section" : "Cut Section"
         cutButton.isEnabled = trimBar.selection != nil
-        exportButton.isEnabled = timeline != nil && !exporting
+        exportButton.isEnabled = timeline != nil && !exporting && !(edits.studioSound && studioAudio == nil)
     }
 
     // MARK: Playback
@@ -590,7 +638,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     // MARK: Export
 
     @objc func exportClicked() {
-        guard let timeline, !exporting else { return }
+        guard let timeline, exportButton.isEnabled else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
         panel.nameFieldStringValue = file.deletingPathExtension().lastPathComponent + " (edited).mp4"
@@ -619,9 +667,10 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         player.pause()
         setStatus("Exporting…", busy: true)
         let captions = self.captions
+        let audio = edits.studioSound ? studioAudio : nil
         Task {
             do {
-                try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+                try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
                                           burnCaptions: burnCaptions, to: url) { [weak self] fraction in
                     self?.setStatus("Exporting \(Int(fraction * 100))%…", busy: true)
                 }
