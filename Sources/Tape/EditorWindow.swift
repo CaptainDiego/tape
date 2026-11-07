@@ -666,16 +666,22 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             var current = transcript.wordIndex(at: source)
             if let i = current, source > transcript.words[i].end + 0.6 { current = nil }
             if current != highlighted, let storage = transcriptView.textStorage, storage.length > 0 {
-                storage.beginEditing()
-                if let old = highlighted, let range = wordRanges[old] {
-                    storage.removeAttribute(.backgroundColor, range: range)
+                // Ranges must still fit the text (it's rebuilt after every edit).
+                func valid(_ i: Int?) -> NSRange? {
+                    guard let i, let range = wordRanges[i], NSMaxRange(range) <= storage.length else { return nil }
+                    return range
                 }
-                if let new = current, let range = wordRanges[new] {
+                storage.beginEditing()
+                if let range = valid(highlighted) { storage.removeAttribute(.backgroundColor, range: range) }
+                let newRange = valid(current)
+                if let range = newRange {
                     storage.addAttribute(.backgroundColor, value: NSColor.controlAccentColor.withAlphaComponent(0.3),
                                          range: range)
-                    if player.rate != 0 { transcriptView.scrollRangeToVisible(range) }
                 }
                 storage.endEditing()
+                // Scroll only once the edit is finished: asking for layout in
+                // the middle of one raises an exception (the crash).
+                if let range = newRange, player.rate != 0 { transcriptView.scrollRangeToVisible(range) }
                 highlighted = current
             }
         }
