@@ -23,15 +23,13 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private let spinner = NSProgressIndicator()
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private let captionsToggle = NSButton(checkboxWithTitle: "Captions", target: nil, action: nil)
-    private let studioToggle = NSButton(checkboxWithTitle: "Studio Sound", target: nil, action: nil)
-    /// The Studio Sound audio, once processed.
-    private var studioAudio: AVURLAsset?
-    private var processingStudio = false
     private let fillersButton = NSButton(title: "Remove Fillers", target: nil, action: nil)
     private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
     private let rewriteButton = NSButton(title: "Rewrite…", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
+    private let shareButton = NSButton(title: "Share…", target: nil, action: nil)
+    private lazy var shareRecord = ShareRecord.load(for: file)
     private let cutButton = NSButton(title: "Cut Section", target: nil, action: nil)
     private let speedMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     private static let rates: [Double] = [1, 1.25, 1.5, 1.75, 2, 2.5, 3]
@@ -179,13 +177,14 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         for (button, action) in [(captionsToggle, #selector(toggleCaptions)), (fillersButton, #selector(removeFillers)),
                                  (undoButton, #selector(undoClicked)), (restoreButton, #selector(restoreAll)),
                                  (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked)),
+                                 (shareButton, #selector(shareClicked)),
                                  (cutButton, #selector(cutOrRestoreSelection)),
-                                 (studioToggle, #selector(toggleStudioSound)),
                                  (rewriteButton, #selector(rewriteClicked))] {
             button.target = self
             button.action = action
         }
-        for button in [rewriteButton, fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton] {
+        for button in [rewriteButton, fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton,
+                       shareButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
         }
@@ -201,9 +200,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         status.maximumNumberOfLines = 5
         status.preferredMaxLayoutWidth = 300
 
-        studioToggle.toolTip = "Removes background noise and echo and evens out your voice, like a studio mic. "
-            + "Runs on this Mac."
-        let header = NSStackView(views: [title, NSView(), studioToggle, captionsToggle, exportButton])
+        shareButton.toolTip = "Upload to your own share page and copy the link. Recordings stay on this Mac otherwise."
+        let header = NSStackView(views: [title, NSView(), captionsToggle, shareButton, exportButton])
         rewriteButton.toolTip = "Change the text of the selected words in the captions. The video isn't changed."
         let tools = NSStackView(views: [rewriteButton, fillersButton, undoButton, restoreButton])
         let editHint = Self.hint("Select words (double-click selects one), then type to rewrite them in the captions, or press "
@@ -243,7 +241,6 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
     private func load() {
         trimBar.loadThumbnails(from: asset)
-        if edits.studioSound { prepareStudioSound() }
         Task {
             sourceDuration = (try? await asset.load(.duration).seconds) ?? 0
             rebuild()
@@ -412,42 +409,6 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         apply(new)
     }
 
-    // MARK: Studio Sound
-
-    @objc private func toggleStudioSound() {
-        var new = edits
-        new.studioSound = studioToggle.state == .on
-        apply(new)
-        if new.studioSound { prepareStudioSound() }
-    }
-
-    /// Processes the audio the first time (a few seconds), then plays and
-    /// exports the cleaned-up version.
-    private func prepareStudioSound() {
-        guard studioAudio == nil, !processingStudio else { return }
-        processingStudio = true
-        updateButtons()
-        setStatus("Applying Studio Sound…", busy: true)
-        let file = self.file
-        Task {
-            do {
-                let url = try await StudioSound.render(file) { fraction in
-                    Task { @MainActor [weak self] in
-                        guard let self, self.processingStudio else { return }
-                        self.setStatus("Applying Studio Sound \(Int(fraction * 100))%…", busy: true)
-                    }
-                }
-                studioAudio = AVURLAsset(url: url)
-                setStatus(nil, busy: false)
-            } catch {
-                setStatus("Studio Sound failed: \(error.localizedDescription)", busy: false,
-                          action: ("Try Again", { [weak self] in self?.prepareStudioSound() }))
-            }
-            processingStudio = false
-            rebuild()
-        }
-    }
-
     // MARK: Sections
 
     /// A click on a cut section of the trim bar selects it, ready to
@@ -598,7 +559,6 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     @objc private func restoreAll() {
         var new = Edits()
         new.corrections = edits.corrections
-        new.studioSound = edits.studioSound
         apply(new)
     }
 
@@ -617,8 +577,6 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         trimBar.trimEnd = edits.trimEnd ?? duration
         trimBar.cuts = timeline.middleCuts
         trimBar.speeds = edits.speeds
-        studioToggle.state = edits.studioSound ? .on : .off
-        let audio = edits.studioSound ? studioAudio : nil
         renderTranscript()
         updateButtons()
 
@@ -626,7 +584,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         let generation = itemGeneration
         let asset = self.asset
         Task {
-            guard let edited = try? await timeline.editedAsset(from: asset, audio: audio),
+            guard let edited = try? await timeline.editedAsset(from: asset),
                   generation == itemGeneration else { return }
             let wasPlaying = player.rate != 0
             let item = AVPlayerItem(asset: edited)
@@ -660,7 +618,9 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
                 speedMenu.setTitle("Mixed")
             }
         }
-        exportButton.isEnabled = timeline != nil && !exporting && !(edits.studioSound && studioAudio == nil)
+        exportButton.isEnabled = timeline != nil && !exporting
+        shareButton.isEnabled = exportButton.isEnabled
+        shareButton.title = shareRecord == nil ? "Share…" : "Shared ▾"
     }
 
     // MARK: Playback
@@ -749,10 +709,9 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         player.pause()
         setStatus("Exporting…", busy: true)
         let captions = self.captions
-        let audio = edits.studioSound ? studioAudio : nil
         Task {
             do {
-                try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
+                try await Exporter.export(source: asset, timeline: timeline, captions: captions,
                                           burnCaptions: burnCaptions, to: url) { [weak self] fraction in
                     self?.setStatus("Exporting \(Int(fraction * 100))%…", busy: true)
                 }
@@ -769,6 +728,208 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
             exporting = false
             updateButtons()
         }
+    }
+
+    // MARK: Sharing
+
+    @objc func shareClicked() {
+        guard shareButton.isEnabled else { return }
+        guard SharingConfig.isConfigured else {
+            showSharingSettings { [weak self] in self?.confirmShare() }
+            return
+        }
+        if let shareRecord { showShareMenu(shareRecord) } else { confirmShare() }
+    }
+
+    /// Nothing leaves the Mac without this confirmation.
+    private func confirmShare() {
+        guard let server = SharingConfig.server else { return }
+        let alert = NSAlert()
+        alert.messageText = "Share this recording?"
+        alert.informativeText = "Tape uploads the edited video and its transcript to \(server.host ?? server.absoluteString). "
+            + "Anyone with the link can watch it and download the transcript. You can stop sharing at any time."
+        let field = NSTextField(string: file.deletingPathExtension().lastPathComponent)
+        field.placeholderString = "Title"
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Upload")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                self?.upload(title: title.isEmpty ? "Untitled recording" : title, existingID: nil)
+            }
+        }
+    }
+
+    private func showShareMenu(_ record: ShareRecord) {
+        let menu = NSMenu()
+        let views = ActionItem("Views: …", enabled: false) {}
+        menu.addItem(views)
+        menu.addItem(.separator())
+        menu.addItem(ActionItem("Copy Link") { [weak self] in
+            Self.copy(record.url)
+            self?.setStatus("Link copied.", busy: false)
+        })
+        menu.addItem(ActionItem("Open in Browser") { NSWorkspace.shared.open(record.url) })
+        menu.addItem(.separator())
+        menu.addItem(ActionItem("Update with Current Edits") { [weak self] in
+            self?.upload(title: record.title, existingID: record.id)
+        })
+        menu.addItem(ActionItem("Stop Sharing…") { [weak self] in self?.confirmStopSharing(record) })
+        menu.addItem(.separator())
+        menu.addItem(ActionItem("Sharing Settings…") { [weak self] in self?.showSharingSettings(then: nil) })
+        Task {
+            do {
+                let info = try await ShareClient().info(id: record.id)
+                views.title = info.views == 1 ? "1 view" : "\(info.views) views"
+            } catch SharingError.notFound {
+                views.title = "Deleted on the server"
+            } catch {
+                views.title = "Views: offline"
+            }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: shareButton.bounds.height + 4), in: shareButton)
+    }
+
+    private func upload(title: String, existingID: String?) {
+        guard let timeline, !exporting else { return }
+        let client: ShareClient
+        do { client = try ShareClient() } catch { return setStatus(error.localizedDescription, busy: false) }
+        exporting = true
+        updateButtons()
+        player.pause()
+        setStatus("Preparing the video…", busy: true)
+        let captions = self.captions
+        let file = self.file
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("tape-share-\(UUID().uuidString).mp4")
+        Task {
+            do {
+                // Captions go up as a track the viewer can turn off, so the
+                // video itself stays clean.
+                try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+                                          burnCaptions: false, to: temp) { [weak self] fraction in
+                    self?.setStatus("Preparing the video \(Int(fraction * 100))%…", busy: true)
+                }
+                let duration = (try? await AVURLAsset(url: temp).load(.duration).seconds) ?? 0
+                let result = try await client.share(video: temp, vtt: Caption.vtt(captions), title: title,
+                                                    duration: duration, existingID: existingID) { [weak self] fraction in
+                    self?.setStatus("Uploading \(Int(fraction * 100))%…", busy: true)
+                }
+                let record = ShareRecord(id: result.id, url: result.url, server: client.server, title: title,
+                                         uploadedAt: Date())
+                try? record.save(for: file)
+                shareRecord = record
+                Self.copy(result.url)
+                setStatus(existingID == nil ? "Link copied: \(result.url.absoluteString)" : "Updated. Same link as before.",
+                          busy: false, action: ("Open", { NSWorkspace.shared.open(result.url) }))
+            } catch SharingError.notFound where existingID != nil {
+                ShareRecord.remove(for: file)
+                shareRecord = nil
+                setStatus("That link was deleted on the server. Click Share to make a new one.", busy: false)
+            } catch {
+                setStatus("Sharing failed: \(error.localizedDescription)", busy: false)
+            }
+            try? FileManager.default.removeItem(at: temp)
+            exporting = false
+            updateButtons()
+        }
+    }
+
+    private func confirmStopSharing(_ record: ShareRecord) {
+        let alert = NSAlert()
+        alert.messageText = "Stop sharing this recording?"
+        alert.informativeText = "The link stops working and the video is deleted from your server. "
+            + "The recording on this Mac isn't touched."
+        alert.addButton(withTitle: "Stop Sharing")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated { self?.stopSharing(record) }
+        }
+    }
+
+    private func stopSharing(_ record: ShareRecord) {
+        setStatus("Deleting the shared copy…", busy: true)
+        let file = self.file
+        Task {
+            do {
+                do { try await ShareClient().delete(id: record.id) } catch SharingError.notFound {}
+                ShareRecord.remove(for: file)
+                shareRecord = nil
+                setStatus("Stopped sharing. The link no longer works.", busy: false)
+            } catch {
+                setStatus("Couldn't stop sharing: \(error.localizedDescription)", busy: false)
+            }
+            updateButtons()
+        }
+    }
+
+    /// Server address and token. Saving checks them against the server.
+    private func showSharingSettings(then next: (() -> Void)?) {
+        let alert = NSAlert()
+        alert.messageText = "Sharing Settings"
+        alert.informativeText = "Sharing uploads to your own Cloudflare Worker (see server/README.md). "
+            + "Recordings stay on this Mac unless you click Share. The token is kept in your Keychain."
+        let server = NSTextField(string: SharingConfig.server?.absoluteString ?? "")
+        server.placeholderString = "https://tape.example.com"
+        let token = NSSecureTextField(string: SharingConfig.token ?? "")
+        token.placeholderString = "Upload token"
+        for field in [server, token] { field.translatesAutoresizingMaskIntoConstraints = false }
+        let grid = NSGridView(views: [[NSTextField(labelWithString: "Server:"), server],
+                                      [NSTextField(labelWithString: "Token:"), token]])
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        server.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        token.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        grid.frame = NSRect(x: 0, y: 0, width: 320, height: 56)
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if SharingConfig.isConfigured { alert.addButton(withTitle: "Turn Off Sharing") }
+        alert.window.initialFirstResponder = server
+        alert.beginSheetModal(for: window) { [weak self] response in
+            MainActor.assumeIsolated {
+                switch response {
+                case .alertFirstButtonReturn:
+                    self?.saveSharingSettings(server: server.stringValue, token: token.stringValue, then: next)
+                case .alertThirdButtonReturn:
+                    SharingConfig.server = nil
+                    SharingConfig.token = nil
+                    self?.setStatus("Sharing is off. Links you already shared keep working.", busy: false)
+                default: break
+                }
+            }
+        }
+    }
+
+    private func saveSharingSettings(server text: String, token: String, then next: (() -> Void)?) {
+        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let server = SharingConfig.parseServer(text) else {
+            return setStatus("The server address must start with https://.", busy: false)
+        }
+        guard token.count >= 16 else { return setStatus("The token should be at least 16 characters.", busy: false) }
+        SharingConfig.server = server
+        SharingConfig.token = token
+        setStatus("Checking \(server.host ?? "the server")…", busy: true)
+        Task {
+            do {
+                try await ShareClient().check()
+                setStatus("Sharing is set up.", busy: false)
+                next?()
+            } catch {
+                setStatus("Saved, but the server check failed: \(error.localizedDescription)", busy: false,
+                          action: ("Settings…", { [weak self] in self?.showSharingSettings(then: next) }))
+            }
+        }
+    }
+
+    private static func copy(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
 
     private static func timestamp(_ seconds: TimeInterval) -> String {

@@ -1,0 +1,19 @@
+# Tape share server: one Worker, one private R2 bucket, one small D1 table.
+# Setup steps are in ../docs/sharing-plan.md ("Deploying").
+name = "tape"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "tape-shares"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tape"
+# Replace with the id `npx wrangler d1 create tape` prints.
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Secret, set with `npx wrangler secret put UPLOAD_TOKEN` (and in .dev.vars
+# for local development). Never put it in this file.

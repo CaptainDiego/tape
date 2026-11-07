@@ -13,8 +13,6 @@ struct Edits: Codable, Equatable {
     /// Words whose caption text the user fixed. An empty string means the
     /// word was merged into the one before it (the video isn't cut).
     var corrections: [Int: String] = [:]
-    /// Use the Studio Sound version of the audio.
-    var studioSound = false
     /// Sections played faster (or slower), in source time. They never overlap.
     var speeds: [Speed] = []
 
@@ -55,7 +53,6 @@ struct Edits: Codable, Equatable {
         trimEnd = try c.decodeIfPresent(TimeInterval.self, forKey: .trimEnd)
         cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
         corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
-        studioSound = try c.decodeIfPresent(Bool.self, forKey: .studioSound) ?? false
         speeds = try c.decodeIfPresent([Speed].self, forKey: .speeds) ?? []
     }
 
@@ -206,14 +203,12 @@ struct Timeline {
     }
 
     /// The edited video: the kept pieces of the original, back to back.
-    /// `audio`, if given, replaces the recording's sound (Studio Sound); it
-    /// must line up with the video from time zero.
-    func editedAsset(from asset: AVURLAsset, audio: AVURLAsset? = nil) async throws -> AVAsset {
-        if isUncut, audio == nil { return asset }
+    func editedAsset(from asset: AVURLAsset) async throws -> AVAsset {
+        if isUncut { return asset }
         let composition = AVMutableComposition()
         var tracks: [(AVAssetTrack, AVMutableCompositionTrack)] = []
-        for (source, type) in [(asset, AVMediaType.video), (audio ?? asset, .audio)] {
-            for track in try await source.loadTracks(withMediaType: type) {
+        for type in [AVMediaType.video, .audio] {
+            for track in try await asset.loadTracks(withMediaType: type) {
                 guard let copy = composition.addMutableTrack(withMediaType: type,
                                                              preferredTrackID: kCMPersistentTrackID_Invalid)
                 else { continue }
@@ -289,6 +284,18 @@ struct Caption: Equatable {
         }
         return captions.enumerated().map { i, c in
             "\(i + 1)\n\(stamp(c.start)) --> \(stamp(c.end))\n\(c.text)\n"
+        }.joined(separator: "\n")
+    }
+
+    /// WebVTT, for the captions track on a shared page.
+    static func vtt(_ captions: [Caption]) -> String {
+        func stamp(_ t: TimeInterval) -> String {
+            let ms = Int((max(t, 0) * 1000).rounded())
+            return String(format: "%02d:%02d:%02d.%03d", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+        }
+        return "WEBVTT\n\n" + captions.map { c in
+            // "-->" inside the text would read as a timing line.
+            "\(stamp(c.start)) --> \(stamp(c.end))\n\(c.text.replacingOccurrences(of: "-->", with: "→"))\n"
         }.joined(separator: "\n")
     }
 

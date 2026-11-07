@@ -84,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item("Quit Tape", #selector(NSApplication.terminate(_:)), "q"),
         ]))
         main.addItem(menu("File", [
+            item("Share…", #selector(EditorWindow.shareClicked), "s", [.command, .shift]),
             item("Export…", #selector(EditorWindow.exportClicked), "e"),
             item("Close", #selector(NSWindow.performClose(_:)), "w"),
         ]))

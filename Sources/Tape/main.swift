@@ -25,24 +25,6 @@ if let flag = CommandLine.arguments.firstIndex(of: "--transcribe"), flag + 1 < C
     exit(0)
 }
 
-// `Tape --studio <video>` writes the Studio Sound audio next to a recording.
-if let flag = CommandLine.arguments.firstIndex(of: "--studio"), flag + 1 < CommandLine.arguments.count {
-    let file = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
-    let done = DispatchSemaphore(value: 0)
-    Task.detached {
-        do {
-            let start = Date()
-            let output = try await StudioSound.render(file)
-            print(String(format: "wrote %@ in %.1fs", output.lastPathComponent, Date().timeIntervalSince(start)))
-        } catch {
-            print("error: \(error.localizedDescription)")
-        }
-        done.signal()
-    }
-    done.wait()
-    exit(0)
-}
-
 // `Tape --export <video> <out.mp4>` renders a recording with its saved edits
 // and burned-in captions, the same as the Export button.
 if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < CommandLine.arguments.count {
@@ -56,12 +38,46 @@ if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < Comma
             let edits = Edits.load(for: source)
             let timeline = Timeline(edits: edits, words: words, sourceDuration: try await asset.load(.duration).seconds)
             let captions = timeline.captions(words, edits: edits)
-            let audio = edits.studioSound ? AVURLAsset(url: try await StudioSound.render(source)) : nil
-            try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
+            try await Exporter.export(source: asset, timeline: timeline, captions: captions,
                                       burnCaptions: true, to: output) { _ in }
             print(String(format: "exported %.1fs (from %.1fs), %d captions", timeline.duration,
                          timeline.sourceDuration, captions.count))
             print(Caption.srt(captions))
+        } catch {
+            print("error: \(error.localizedDescription)")
+        }
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
+// `TAPE_SERVER=… TAPE_TOKEN=… Tape --share <video>` uploads a recording with
+// its saved edits, like the Share button, and prints the link. For testing a
+// server; the token comes from the environment so it stays out of `ps`.
+if let flag = CommandLine.arguments.firstIndex(of: "--share"), flag + 1 < CommandLine.arguments.count {
+    let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+    let env = ProcessInfo.processInfo.environment
+    guard let server = env["TAPE_SERVER"].flatMap(SharingConfig.parseServer), let token = env["TAPE_TOKEN"] else {
+        print("error: set TAPE_SERVER and TAPE_TOKEN")
+        exit(1)
+    }
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("tape-share-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        do {
+            let asset = AVURLAsset(url: source)
+            let words = Transcript.load(for: source)?.words ?? []
+            let edits = Edits.load(for: source)
+            let timeline = Timeline(edits: edits, words: words, sourceDuration: try await asset.load(.duration).seconds)
+            let captions = timeline.captions(words, edits: edits)
+            try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+                                      burnCaptions: false, to: temp) { _ in }
+            let result = try await ShareClient(server: server, token: token).share(
+                video: temp, vtt: Caption.vtt(captions), title: source.deletingPathExtension().lastPathComponent,
+                duration: timeline.duration, existingID: env["TAPE_SHARE_ID"]) { _ in }
+            print(result.url.absoluteString)
         } catch {
             print("error: \(error.localizedDescription)")
         }
