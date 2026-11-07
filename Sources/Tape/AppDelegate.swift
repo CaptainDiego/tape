@@ -32,6 +32,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         refreshStatusItem()
         NSApp.mainMenu = Self.mainMenu()
+        Task { await askForPermissions() }
+    }
+
+    /// Asks for camera, microphone and screen recording access right at
+    /// launch, one after the other, so the first recording just starts.
+    /// Each prompt only appears if the user hasn't answered it yet.
+    private func askForPermissions() async {
+        if settings.cameraID != nil, AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
+            _ = await AVCaptureDevice.requestAccess(for: .video)
+        }
+        if settings.micID != nil, AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+        }
+        // Shows the system's screen recording prompt, which offers to open
+        // System Settings. macOS asks to reopen the app once it's allowed.
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
+        }
     }
 
     /// Don't quit halfway through a recording: stop it from the menu bar first.
