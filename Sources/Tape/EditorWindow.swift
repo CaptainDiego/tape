@@ -32,6 +32,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
     private let cutButton = NSButton(title: "Cut Section", target: nil, action: nil)
+    private let speedMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+    private static let rates: [Double] = [1, 1.25, 1.5, 1.75, 2, 2.5, 3]
     private var editPopover: NSPopover?
     private var editingWords: [Int] = []
 
@@ -117,10 +119,19 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         trimBar.onSelectionChange = { [weak self] _ in self?.updateButtons() }
         trimBar.onDelete = { [weak self] in self?.cutOrRestoreSelection() }
         trimBar.onPlayPause = { [weak self] in self?.playPause() }
-        let trimHint = Self.hint("Drag the yellow handles to trim the ends. Drag across the strip to select a section "
-                                 + "and press Delete to cut it. Click a red section to select it and restore it.")
+        let trimHint = Self.hint("Drag the yellow handles to trim the ends. Drag across the strip to select a section, "
+                                 + "then cut it (Delete) or pick a speed. With nothing selected, the speed applies to "
+                                 + "the whole video. Click a red or blue section to select it.")
         trimHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let trimRow = NSStackView(views: [trimHint, cutButton])
+        speedMenu.addItems(withTitles: Self.rates.map { TrimBar.format($0) })
+        speedMenu.controlSize = .small
+        speedMenu.target = self
+        speedMenu.action = #selector(speedChosen)
+        speedMenu.toolTip = "Speed of the selected section, or of the whole video when nothing is selected."
+        let speedLabel = NSTextField(labelWithString: "Speed")
+        speedLabel.font = .systemFont(ofSize: 11)
+        speedLabel.textColor = .secondaryLabelColor
+        let trimRow = NSStackView(views: [trimHint, speedLabel, speedMenu, cutButton])
         trimRow.alignment = .top
         let left = NSStackView(views: [playerView, trimBar, trimRow])
         left.orientation = .vertical
@@ -434,11 +445,39 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
     // MARK: Sections
 
-    /// A click on a cut section of the trim bar selects it, ready to restore.
+    /// A click on a cut section of the trim bar selects it, ready to
+    /// restore; a click on a sped-up section selects that.
     private func selectCut(at source: TimeInterval) {
         if let cut = timeline?.middleCuts.first(where: { $0.contains(source) }) {
             trimBar.selection = cut
+        } else if let speed = edits.speeds.first(where: { source >= $0.start && source < $0.end }) {
+            trimBar.selection = speed.start...speed.end
         }
+    }
+
+    /// The stretch the speed menu acts on: the selection, or everything.
+    private var speedRange: ClosedRange<TimeInterval>? {
+        trimBar.selection ?? sourceDuration.map { 0...$0 }
+    }
+
+    /// Every speed used somewhere in the range (1 for the parts at normal speed).
+    private func ratesIn(_ range: ClosedRange<TimeInterval>) -> Set<Double> {
+        var rates: Set<Double> = []
+        var covered = range.lowerBound
+        for s in edits.speeds where s.end > range.lowerBound + 0.02 && s.start < range.upperBound - 0.02 {
+            if s.start > covered + 0.02 { rates.insert(1) }
+            rates.insert(s.rate)
+            covered = max(covered, s.end)
+        }
+        if covered < range.upperBound - 0.02 { rates.insert(1) }
+        return rates
+    }
+
+    @objc private func speedChosen() {
+        guard let range = speedRange, Self.rates.indices.contains(speedMenu.indexOfSelectedItem) else { return }
+        var new = edits
+        new.setSpeed(Self.rates[speedMenu.indexOfSelectedItem], from: range.lowerBound, to: range.upperBound)
+        apply(new)
     }
 
     private var selectionIsCut: Bool {
@@ -555,6 +594,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         trimBar.trimStart = edits.trimStart ?? 0
         trimBar.trimEnd = edits.trimEnd ?? duration
         trimBar.cuts = timeline.middleCuts
+        trimBar.speeds = edits.speeds
         studioToggle.state = edits.studioSound ? .on : .off
         let audio = edits.studioSound ? studioAudio : nil
         renderTranscript()
@@ -567,7 +607,9 @@ final class EditorWindow: NSObject, NSWindowDelegate {
             guard let edited = try? await timeline.editedAsset(from: asset, audio: audio),
                   generation == itemGeneration else { return }
             let wasPlaying = player.rate != 0
-            player.replaceCurrentItem(with: AVPlayerItem(asset: edited))
+            let item = AVPlayerItem(asset: edited)
+            item.audioTimePitchAlgorithm = .spectral  // sped-up parts keep a natural voice
+            player.replaceCurrentItem(with: item)
             await player.seek(to: CMTime(seconds: timeline.playbackTime(atSource: sourceNow), preferredTimescale: 600),
                               toleranceBefore: .zero, toleranceAfter: .zero)
             if wasPlaying { player.play() }
@@ -580,10 +622,21 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         fillersButton.title = fillers > 0 ? "Remove \(fillers) Filler\(fillers == 1 ? "" : "s")" : "No Fillers"
         fillersButton.isEnabled = fillers > 0
         undoButton.isEnabled = !undoStack.isEmpty
-        restoreButton.isEnabled = edits.deletedWords.count + edits.cuts.count > 0
+        restoreButton.isEnabled = edits.deletedWords.count + edits.cuts.count + edits.speeds.count > 0
             || edits.trimStart != nil || edits.trimEnd != nil
         cutButton.title = selectionIsCut ? "Restore Section" : "Cut Section"
         cutButton.isEnabled = trimBar.selection != nil
+        // Show the speed of the selection (or of the whole video), if it's
+        // all one speed.
+        if let range = speedRange {
+            let rates = ratesIn(range)
+            if rates.count == 1, let index = Self.rates.firstIndex(of: rates.first!) {
+                speedMenu.selectItem(at: index)
+            } else {
+                speedMenu.selectItem(at: -1)
+                speedMenu.setTitle("Mixed")
+            }
+        }
         exportButton.isEnabled = timeline != nil && !exporting && !(edits.studioSound && studioAudio == nil)
     }
 

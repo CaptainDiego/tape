@@ -15,6 +15,30 @@ struct Edits: Codable, Equatable {
     var corrections: [Int: String] = [:]
     /// Use the Studio Sound version of the audio.
     var studioSound = false
+    /// Sections played faster (or slower), in source time. They never overlap.
+    var speeds: [Speed] = []
+
+    struct Speed: Codable, Equatable {
+        var start: TimeInterval
+        var end: TimeInterval
+        var rate: Double
+    }
+
+    /// Sets the speed of a stretch, replacing whatever speed parts of it had.
+    mutating func setSpeed(_ rate: Double, from start: TimeInterval, to end: TimeInterval) {
+        var result: [Speed] = []
+        for s in speeds {
+            if s.end <= start || s.start >= end { result.append(s); continue }
+            if s.start < start { result.append(Speed(start: s.start, end: start, rate: s.rate)) }
+            if s.end > end { result.append(Speed(start: end, end: s.end, rate: s.rate)) }
+        }
+        if abs(rate - 1) > 0.001, end > start { result.append(Speed(start: start, end: end, rate: rate)) }
+        speeds = result.sorted { $0.start < $1.start }
+    }
+
+    func rate(at t: TimeInterval) -> Double {
+        speeds.first { t >= $0.start && t < $0.end }?.rate ?? 1
+    }
 
     struct Cut: Codable, Equatable {
         var start: TimeInterval
@@ -32,6 +56,7 @@ struct Edits: Codable, Equatable {
         cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
         corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
         studioSound = try c.decodeIfPresent(Bool.self, forKey: .studioSound) ?? false
+        speeds = try c.decodeIfPresent([Speed].self, forKey: .speeds) ?? []
     }
 
     /// True if the word is cut from the video, by deleting it in the
@@ -88,7 +113,10 @@ struct Timeline {
         let sourceStart: TimeInterval
         let sourceEnd: TimeInterval
         let playbackStart: TimeInterval
+        /// 2 plays twice as fast.
+        var rate: Double = 1
         var length: TimeInterval { sourceEnd - sourceStart }
+        var playbackLength: TimeInterval { length / rate }
     }
 
     let pieces: [Piece]
@@ -96,8 +124,11 @@ struct Timeline {
     /// Stretches removed from the middle (deleted words and sections cut on
     /// the trim bar), merged and sorted. Not counting the trimmed ends.
     let middleCuts: [ClosedRange<TimeInterval>]
-    var duration: TimeInterval { pieces.last.map { $0.playbackStart + $0.length } ?? 0 }
-    var isUncut: Bool { pieces.count == 1 && pieces[0].sourceStart <= 0.001 && pieces[0].sourceEnd >= sourceDuration - 0.001 }
+    var duration: TimeInterval { pieces.last.map { $0.playbackStart + $0.playbackLength } ?? 0 }
+    var isUncut: Bool {
+        pieces.count == 1 && pieces[0].rate == 1
+            && pieces[0].sourceStart <= 0.001 && pieces[0].sourceEnd >= sourceDuration - 0.001
+    }
 
     init(edits: Edits, words: [Word], sourceDuration: TimeInterval) {
         self.sourceDuration = sourceDuration
@@ -139,28 +170,37 @@ struct Timeline {
         if let end = edits.trimEnd, end < sourceDuration { cuts.append((end, sourceDuration)) }
 
         // Keep whatever the cuts leave, skipping slivers too short to matter.
-        var pieces: [Piece] = []
+        var kept: [(TimeInterval, TimeInterval)] = []
         var cursor: TimeInterval = 0
-        var playback: TimeInterval = 0
         for (start, end) in cuts.sorted(by: { $0.0 < $1.0 }) + [(sourceDuration, sourceDuration)] {
-            if start - cursor > 0.04 {
-                pieces.append(Piece(sourceStart: cursor, sourceEnd: start, playbackStart: playback))
-                playback += start - cursor
-            }
+            if start - cursor > 0.04 { kept.append((cursor, start)) }
             cursor = max(cursor, end)
+        }
+
+        // Split the kept stretches where the speed changes.
+        let boundaries = edits.speeds.flatMap { [$0.start, $0.end] }
+        var pieces: [Piece] = []
+        var playback: TimeInterval = 0
+        for (start, end) in kept {
+            let splits = [start] + boundaries.filter { $0 > start + 0.02 && $0 < end - 0.02 }.sorted() + [end]
+            for (a, b) in zip(splits, splits.dropFirst()) {
+                let piece = Piece(sourceStart: a, sourceEnd: b, playbackStart: playback, rate: edits.rate(at: (a + b) / 2))
+                pieces.append(piece)
+                playback += piece.playbackLength
+            }
         }
         self.pieces = pieces
     }
 
     func sourceTime(atPlayback t: TimeInterval) -> TimeInterval {
         guard let piece = pieces.last(where: { $0.playbackStart <= t }) ?? pieces.first else { return t }
-        return piece.sourceStart + min(max(t - piece.playbackStart, 0), piece.length)
+        return piece.sourceStart + min(max(t - piece.playbackStart, 0) * piece.rate, piece.length)
     }
 
     /// For a source time inside a cut, returns where playback resumes.
     func playbackTime(atSource t: TimeInterval) -> TimeInterval {
         for piece in pieces where t < piece.sourceEnd {
-            return piece.playbackStart + max(t - piece.sourceStart, 0)
+            return piece.playbackStart + max(t - piece.sourceStart, 0) / piece.rate
         }
         return duration
     }
@@ -192,7 +232,14 @@ struct Timeline {
                 guard part.duration > .zero else { continue }
                 try copy.insertTimeRange(part, of: track, at: at + (part.start - range.start))
             }
-            at = at + range.duration
+            if piece.rate == 1 {
+                at = at + range.duration
+            } else {
+                // Play this piece faster: squeeze its time range.
+                let scaled = CMTimeMultiplyByFloat64(range.duration, multiplier: 1 / piece.rate)
+                composition.scaleTimeRange(CMTimeRange(start: at, duration: range.duration), toDuration: scaled)
+                at = at + scaled
+            }
         }
         return composition
     }

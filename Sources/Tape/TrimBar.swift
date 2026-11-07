@@ -12,6 +12,8 @@ final class TrimBar: NSView {
     var trimStart: TimeInterval = 0 { didSet { needsDisplay = true } }
     var trimEnd: TimeInterval = 0 { didSet { needsDisplay = true } }
     var cuts: [ClosedRange<TimeInterval>] = [] { didSet { needsDisplay = true } }
+    /// Sections at another speed, labelled "2×" and so on.
+    var speeds: [Edits.Speed] = [] { didSet { needsDisplay = true } }
     var playhead: TimeInterval = 0 { didSet { if oldValue != playhead { needsDisplay = true } } }
     var selection: ClosedRange<TimeInterval>? {
         didSet {
@@ -108,6 +110,26 @@ final class TrimBar: NSView {
             r.fill()
         }
 
+        // Sped-up sections: a blue band along the bottom with the speed.
+        for speed in speeds {
+            let r = NSRect(x: x(for: speed.start), y: strip.minY,
+                           width: max(x(for: speed.end) - x(for: speed.start), 1), height: strip.height)
+            NSColor.systemBlue.withAlphaComponent(0.25).setFill()
+            r.fill()
+            NSColor.systemBlue.setFill()
+            NSRect(x: r.minX, y: r.minY, width: r.width, height: 4).fill()
+            let label = NSAttributedString(string: Self.format(speed.rate), attributes: [
+                .font: NSFont.systemFont(ofSize: 10, weight: .bold), .foregroundColor: NSColor.white,
+            ])
+            let size = label.size()
+            if size.width + 8 < r.width {
+                let badge = NSRect(x: r.minX + 4, y: r.maxY - size.height - 5, width: size.width + 6, height: size.height + 2)
+                NSColor.systemBlue.setFill()
+                NSBezierPath(roundedRect: badge, xRadius: 3, yRadius: 3).fill()
+                label.draw(at: NSPoint(x: badge.minX + 3, y: badge.minY + 1))
+            }
+        }
+
         // Trimmed-off ends.
         NSColor.black.withAlphaComponent(0.6).setFill()
         NSRect(x: strip.minX, y: strip.minY, width: x(for: trimStart) - strip.minX, height: strip.height).fill()
@@ -145,6 +167,10 @@ final class TrimBar: NSView {
         NSColor.white.setFill()
         NSBezierPath(roundedRect: NSRect(x: px - 1.5, y: bounds.minY, width: 3, height: bounds.height),
                      xRadius: 1.5, yRadius: 1.5).fill()
+    }
+
+    static func format(_ rate: Double) -> String {
+        (rate == rate.rounded() ? String(Int(rate)) : String(format: "%g", rate)) + "×"
     }
 
     /// Draws the image scaled to fill `rect`, cropping the overflow.

@@ -18,6 +18,8 @@ enum Exporter {
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality)
         else { throw ExportError.cannotExport }
 
+        // Sped-up sections keep the voice's natural pitch.
+        session.audioTimePitchAlgorithm = .spectral
         if burnCaptions, !captions.isEmpty {
             let video = try await AVMutableVideoComposition.videoComposition(withPropertiesOf: asset)
             video.animationTool = captionTool(captions, size: video.renderSize)
