@@ -27,6 +27,5 @@ A minimal Loom-style screen recorder for macOS, written in native Swift. Recordi
 Each install resets Tape's Camera, Microphone and Screen Recording permissions, because ad-hoc builds look like a new app to macOS. Grant them again on the first recording. Screen Recording needs Tape to be relaunched after you grant it.
 
 ## Next
-1. Studio Sound (voice cleanup, like Descript's)
-2. Playback and export speed
-3. Sharing: hosted link with a transcript download
+1. Playback and export speed
+2. Sharing: hosted link with a transcript download
