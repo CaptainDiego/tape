@@ -111,15 +111,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             title = Self.elapsed(Date().timeIntervalSince(since))
         case .saving: title = "Saving…"
         }
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Tape")
-        image?.isTemplate = true
-        button.image = image
-        button.imagePosition = .imageLeading
-        button.title = title.isEmpty ? "" : " " + title
         button.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        button.contentTintColor = tint
+        if case .recording = state {
+            // A red pill with white text reads on any menu bar, light or dark.
+            button.image = Self.recordingPill(title)
+            button.title = ""
+            button.contentTintColor = nil
+        } else {
+            let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Tape")
+            image?.isTemplate = true
+            button.image = image
+            button.imagePosition = .imageLeading
+            button.title = title.isEmpty ? "" : " " + title
+            button.contentTintColor = tint
+        }
 
         if case .recording = state { statusItem.menu = nil } else { statusItem.menu = menu }
+    }
+
+    /// "■ 1:23" in white on a red rounded pill. Clicking it stops.
+    private static func recordingPill(_ time: String) -> NSImage {
+        let text = NSAttributedString(string: time, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: NSColor.white,
+        ])
+        let textSize = text.size()
+        let square: CGFloat = 7
+        let size = NSSize(width: ceil(8 + square + 5 + textSize.width + 9), height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.systemRed.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+            NSColor.white.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 8, y: (rect.height - square) / 2, width: square, height: square),
+                         xRadius: 1.5, yRadius: 1.5).fill()
+            text.draw(at: NSPoint(x: 8 + square + 5, y: (rect.height - textSize.height) / 2))
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = "Recording \(time). Click to stop."
+        return image
     }
 
     private static func elapsed(_ seconds: TimeInterval) -> String {
