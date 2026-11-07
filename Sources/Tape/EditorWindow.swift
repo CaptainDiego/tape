@@ -8,7 +8,7 @@ import AppKit
 /// Editing is non-destructive. Deleting words or dragging the trim handles
 /// only changes the saved `Edits`; playback and export skip the cut parts.
 @MainActor
-final class EditorWindow: NSObject, NSWindowDelegate {
+final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private static var openEditors: [EditorWindow] = []
 
     private let file: URL
@@ -30,6 +30,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     private let fillersButton = NSButton(title: "Remove Fillers", target: nil, action: nil)
     private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
+    private let rewriteButton = NSButton(title: "Rewrite…", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
     private let cutButton = NSButton(title: "Cut Section", target: nil, action: nil)
     private let speedMenu = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -158,6 +159,8 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         transcriptView.onUndo = { [weak self] in self?.undo() }
         transcriptView.onRestore = { [weak self] words in self?.restore(words) }
         transcriptView.onEdit = { [weak self] words in self?.editWords(words) }
+        transcriptView.onTypeOver = { [weak self] words, text in self?.editWords(words, typing: text) }
+        transcriptView.delegate = self
         transcriptView.onPlayPause = { [weak self] in self?.playPause() }
         let scroll = NSScrollView()
         scroll.documentView = transcriptView
@@ -177,11 +180,12 @@ final class EditorWindow: NSObject, NSWindowDelegate {
                                  (undoButton, #selector(undoClicked)), (restoreButton, #selector(restoreAll)),
                                  (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked)),
                                  (cutButton, #selector(cutOrRestoreSelection)),
-                                 (studioToggle, #selector(toggleStudioSound))] {
+                                 (studioToggle, #selector(toggleStudioSound)),
+                                 (rewriteButton, #selector(rewriteClicked))] {
             button.target = self
             button.action = action
         }
-        for button in [fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton] {
+        for button in [rewriteButton, fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
         }
@@ -200,10 +204,11 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         studioToggle.toolTip = "Removes background noise and echo and evens out your voice, like a studio mic. "
             + "Runs on this Mac."
         let header = NSStackView(views: [title, NSView(), studioToggle, captionsToggle, exportButton])
-        let tools = NSStackView(views: [fillersButton, undoButton, restoreButton])
-        let editHint = Self.hint("Click a word to jump to it. Select words (double-click selects one) and press Delete to "
-                                + "cut them; click ✂︎ to bring them back. Press Return or right-click to fix a caption. "
-                                + "Space plays and pauses.")
+        rewriteButton.toolTip = "Change the text of the selected words in the captions. The video isn't changed."
+        let tools = NSStackView(views: [rewriteButton, fillersButton, undoButton, restoreButton])
+        let editHint = Self.hint("Select words (double-click selects one), then type to rewrite them in the captions, or press "
+                                + "Delete to cut them from the video. Click ✂︎ to bring cut words back. Click a word to "
+                                + "jump to it; Space plays and pauses.")
         let statusRow = NSStackView(views: [spinner, status, actionButton])
         statusRow.alignment = .centerY
         let sidebar = NSStackView(views: [header, tools, editHint, statusRow, scroll])
@@ -510,7 +515,13 @@ final class EditorWindow: NSObject, NSWindowDelegate {
     /// Opens a small field over the words to retype them. The new text
     /// replaces the first word; the others are folded into it, so the
     /// timing stays and the video isn't cut. Clearing the field cuts them.
-    private func editWords(_ indices: [Int]) {
+    @objc private func rewriteClicked() { editWords(transcriptView.selectedWords()) }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        rewriteButton.isEnabled = !transcriptView.selectedWords().isEmpty
+    }
+
+    private func editWords(_ indices: [Int], typing: String? = nil) {
         guard let words = transcript?.words, let first = indices.min(), let last = indices.max() else { return }
         let visible = (first...last).filter { wordRanges[$0] != nil }
         guard let firstVisible = visible.first, let lastVisible = visible.last,
@@ -519,12 +530,19 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         editPopover?.close()
         editingWords = visible
 
-        let field = NSTextField(string: visible.map { edits.text(of: $0, in: words) }.joined(separator: " "))
-        field.frame = NSRect(x: 10, y: 10, width: 320, height: 24)
+        // Typing over a selection starts with what was typed, like in any
+        // text editor; Rewrite… starts with the current words.
+        let field = NSTextField(string: typing ?? visible.map { edits.text(of: $0, in: words) }.joined(separator: " "))
+        field.frame = NSRect(x: 12, y: 12, width: 320, height: 24)
         field.target = self
         field.action = #selector(commitWordEdit(_:))
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 44))
+        let label = NSTextField(labelWithString: "Rewrite in the captions. Return to save, Esc to cancel.")
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        label.frame = NSRect(x: 12, y: 42, width: 320, height: 16)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 344, height: 66))
         content.addSubview(field)
+        content.addSubview(label)
         let controller = NSViewController()
         controller.view = content
         let popover = NSPopover()
@@ -539,6 +557,10 @@ final class EditorWindow: NSObject, NSWindowDelegate {
         rect.origin.y += transcriptView.textContainerOrigin.y
         popover.show(relativeTo: rect, of: transcriptView, preferredEdge: .maxY)
         popover.contentViewController?.view.window?.makeFirstResponder(field)
+        if typing != nil {  // keep typing after the first letter
+            let end = (field.stringValue as NSString).length
+            field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)
+        }
     }
 
     @objc private func commitWordEdit(_ sender: NSTextField) {
@@ -619,6 +641,7 @@ final class EditorWindow: NSObject, NSWindowDelegate {
 
     private func updateButtons() {
         let fillers = remainingFillers().count
+        rewriteButton.isEnabled = !transcriptView.selectedWords().isEmpty
         fillersButton.title = fillers > 0 ? "Remove \(fillers) Filler\(fillers == 1 ? "" : "s")" : "No Fillers"
         fillersButton.isEnabled = fillers > 0
         undoButton.isEnabled = !undoStack.isEmpty
@@ -774,6 +797,7 @@ private final class TranscriptTextView: NSTextView {
     var onDelete: (([Int]) -> Void)?
     var onRestore: (([Int]) -> Void)?
     var onEdit: (([Int]) -> Void)?
+    var onTypeOver: (([Int], String) -> Void)?
     var onUndo: (() -> Void)?
     var onPlayPause: (() -> Void)?
 
@@ -842,7 +866,15 @@ private final class TranscriptTextView: NSTextView {
         case (6, .command):  // ⌘Z
             onUndo?()
         default:
-            super.keyDown(with: event)
+            // Typing a letter with words selected starts rewriting them.
+            let words = selectedWords()
+            if flags.isSubset(of: [.shift]), !words.isEmpty, let text = event.characters,
+               text.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
+               text.rangeOfCharacter(from: .alphanumerics.union(.punctuationCharacters)) != nil {
+                onTypeOver?(words, text)
+            } else {
+                super.keyDown(with: event)
+            }
         }
     }
 
