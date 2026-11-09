@@ -29,6 +29,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private let rewriteButton = NSButton(title: "Rewrite…", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
     private let shareButton = NSButton(title: "Share…", target: nil, action: nil)
+    private let trashButton = NSButton(image: NSImage(systemSymbolName: "trash", accessibilityDescription: "Move to Trash")!,
+                                       target: nil, action: nil)
     private lazy var shareRecord = ShareRecord.load(for: file)
     private let cutButton = NSButton(title: "Cut Section", target: nil, action: nil)
     private let speedMenu = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -177,14 +179,14 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         for (button, action) in [(captionsToggle, #selector(toggleCaptions)), (fillersButton, #selector(removeFillers)),
                                  (undoButton, #selector(undoClicked)), (restoreButton, #selector(restoreAll)),
                                  (exportButton, #selector(exportClicked)), (actionButton, #selector(actionClicked)),
-                                 (shareButton, #selector(shareClicked)),
+                                 (shareButton, #selector(shareClicked)), (trashButton, #selector(trashClicked)),
                                  (cutButton, #selector(cutOrRestoreSelection)),
                                  (rewriteButton, #selector(rewriteClicked))] {
             button.target = self
             button.action = action
         }
         for button in [rewriteButton, fillersButton, undoButton, restoreButton, exportButton, actionButton, cutButton,
-                       shareButton] {
+                       shareButton, trashButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
         }
@@ -201,7 +203,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         status.preferredMaxLayoutWidth = 300
 
         shareButton.toolTip = "Upload to your own share page and copy the link. Recordings stay on this Mac otherwise."
-        let header = NSStackView(views: [title, NSView(), captionsToggle, shareButton, exportButton])
+        trashButton.toolTip = "Move this recording, its transcript and edits to the Trash."
+        let header = NSStackView(views: [title, NSView(), captionsToggle, shareButton, exportButton, trashButton])
         rewriteButton.toolTip = "Change the text of the selected words in the captions. The video isn't changed."
         let tools = NSStackView(views: [rewriteButton, fillersButton, undoButton, restoreButton])
         let editHint = Self.hint("Select words (double-click selects one), then type to rewrite them in the captions, or press "
@@ -620,6 +623,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         }
         exportButton.isEnabled = timeline != nil && !exporting
         shareButton.isEnabled = exportButton.isEnabled
+        trashButton.isEnabled = !exporting
         shareButton.title = shareRecord == nil ? "Share…" : "Shared ▾"
     }
 
@@ -930,6 +934,56 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private static func copy(_ url: URL) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
+    }
+
+    // MARK: Delete
+
+    @objc func trashClicked() {
+        guard trashButton.isEnabled else { return }
+        let record = shareRecord
+        let alert = NSAlert()
+        alert.messageText = "Move \"\(file.deletingPathExtension().lastPathComponent)\" to the Trash?"
+        alert.informativeText = "The recording, its transcript and edits go to the Trash, so you can still put them "
+            + "back from Finder. Videos you exported aren't touched."
+        let alsoUnshare = NSButton(checkboxWithTitle: "Also delete the shared link from your server", target: nil, action: nil)
+        alsoUnshare.state = .on
+        if record != nil { alert.accessoryView = alsoUnshare }
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            MainActor.assumeIsolated {
+                self?.moveToTrash(unsharing: alsoUnshare.state == .on ? record : nil)
+            }
+        }
+    }
+
+    /// Deletes the shared copy first (if asked), so a failed request doesn't
+    /// leave a live link to a recording that's gone from this Mac.
+    private func moveToTrash(unsharing record: ShareRecord?) {
+        player.pause()
+        exporting = true
+        updateButtons()
+        let file = self.file
+        Task {
+            defer { exporting = false; updateButtons() }
+            if let record {
+                setStatus("Deleting the shared link…", busy: true)
+                do {
+                    do { try await ShareClient().delete(id: record.id) } catch SharingError.notFound {}
+                } catch {
+                    return setStatus("Couldn't delete the shared link, so nothing was moved to the Trash: "
+                                     + error.localizedDescription, busy: false)
+                }
+            }
+            do {
+                try Library.moveToTrash(file)
+            } catch {
+                return setStatus("Couldn't move to the Trash: \(error.localizedDescription)", busy: false)
+            }
+            window.close()
+        }
     }
 
     private static func timestamp(_ seconds: TimeInterval) -> String {

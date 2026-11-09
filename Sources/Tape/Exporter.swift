@@ -1,6 +1,6 @@
 @preconcurrency import AVFoundation
 import AppKit
-import QuartzCore
+import CoreImage
 
 enum ExportError: LocalizedError {
     case cannotExport
@@ -21,9 +21,19 @@ enum Exporter {
         // Sped-up sections keep the voice's natural pitch.
         session.audioTimePitchAlgorithm = .spectral
         if burnCaptions, !captions.isEmpty {
-            let video = try await AVMutableVideoComposition.videoComposition(withPropertiesOf: asset)
-            video.animationTool = captionTool(captions, size: video.renderSize)
-            session.videoComposition = video
+            let size = try await AVMutableVideoComposition.videoComposition(withPropertiesOf: asset).renderSize
+            let overlays = captionOverlays(captions, size: size)
+            // Each frame gets the caption for its own time drawn on top. This
+            // doesn't depend on Core Animation timing, which dropped the
+            // captions when exporting from inside the running app.
+            session.videoComposition = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
+                let t = request.compositionTime.seconds
+                var frame = request.sourceImage
+                if let overlay = overlays.first(where: { t >= $0.start && t < $0.end }) {
+                    frame = overlay.image.composited(over: frame)
+                }
+                request.finish(with: frame, context: nil)
+            }
         }
 
         try? FileManager.default.removeItem(at: output)
@@ -36,43 +46,28 @@ enum Exporter {
         try await session.export(to: output, as: .mp4)
     }
 
-    /// Core Animation layers composited over the video: one caption box per
-    /// line, visible only during its time.
-    private static func captionTool(_ captions: [Caption], size: CGSize) -> AVVideoCompositionCoreAnimationTool {
-        let parent = CALayer()
-        parent.frame = CGRect(origin: .zero, size: size)
-        let videoLayer = CALayer()
-        videoLayer.frame = parent.frame
-        parent.addSublayer(videoLayer)
+    struct Overlay: @unchecked Sendable {
+        let start: TimeInterval
+        let end: TimeInterval
+        let image: CIImage
+    }
 
+    /// One pre-drawn caption box per line, already placed near the bottom
+    /// centre of the frame (Core Image's origin is bottom-left).
+    private static func captionOverlays(_ captions: [Caption], size: CGSize) -> [Overlay] {
         let fontSize = (size.height * 0.042).rounded()
         let font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
         let maxWidth = size.width * 0.8
         let padding = CGSize(width: fontSize * 0.6, height: fontSize * 0.35)
 
-        for caption in captions {
+        return captions.compactMap { caption in
             guard let image = captionImage(caption.text, font: font, maxWidth: maxWidth, padding: padding)
-            else { continue }
-            // Each caption is a pre-drawn image: CATextLayer draws nothing in
-            // the offline export renderer.
-            let layer = CALayer()
-            layer.contents = image
-            layer.frame = CGRect(x: ((size.width - CGFloat(image.width)) / 2).rounded(), y: (size.height * 0.07).rounded(),
-                                 width: CGFloat(image.width), height: CGFloat(image.height))
-            layer.opacity = 0
-
-            // Shown from start to end, hidden otherwise. A begin time of 0
-            // means "now" to Core Animation, so use the AVFoundation constant.
-            let show = CABasicAnimation(keyPath: "opacity")
-            show.fromValue = 1
-            show.toValue = 1
-            show.beginTime = caption.start <= 0 ? AVCoreAnimationBeginTimeAtZero : caption.start
-            show.duration = max(caption.end - caption.start, 0.1)
-            show.isRemovedOnCompletion = true
-            layer.add(show, forKey: "show")
-            parent.addSublayer(layer)
+            else { return nil }
+            let x = ((size.width - CGFloat(image.width)) / 2).rounded()
+            let y = (size.height * 0.07).rounded()
+            return Overlay(start: caption.start, end: caption.end,
+                           image: CIImage(cgImage: image).transformed(by: CGAffineTransform(translationX: x, y: y)))
         }
-        return AVVideoCompositionCoreAnimationTool(postProcessingAsVideoLayer: videoLayer, in: parent)
     }
 
     /// White centered text on a rounded dark box, as a bitmap.

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Builds Tape.app. Pass --install to copy it into /Applications.
+# Builds Tape.app. Pass --install to copy it into /Applications, or --dmg to
+# make dist/Tape-<version>.dmg to send to people.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Tape"
 BUNDLE_ID="com.diego.tape"
-VERSION="0.1.0"
+VERSION="0.4.0"
 APP="$ROOT/dist/$APP_NAME.app"
 
 echo "==> Building release binary"
@@ -63,4 +64,27 @@ if [[ "${1:-}" == "--install" ]]; then
         tccutil reset "$service" "$BUNDLE_ID" >/dev/null 2>&1 || true
     done
     echo "==> Installed. Launch with: open -a $APP_NAME"
+fi
+
+if [[ "${1:-}" == "--dmg" ]]; then
+    DMG="$ROOT/dist/$APP_NAME-$VERSION.dmg"
+    STAGE="$(mktemp -d)"
+    echo "==> Making $DMG"
+    cp -R "$APP" "$STAGE/"
+    ln -s /Applications "$STAGE/Applications"
+    cat > "$STAGE/How to open Tape.txt" <<TXT
+1. Drag Tape onto the Applications folder.
+2. Open Tape. macOS says it can't verify the developer: click Done.
+3. Open System Settings, go to Privacy & Security, scroll down and click
+   "Open Anyway" next to Tape, then confirm.
+4. Tape lives in the menu bar (the record icon at the top of the screen).
+   Allow camera, microphone and screen recording when it asks, then quit
+   and reopen Tape once.
+
+Needs macOS 15 or later on an Apple silicon Mac.
+TXT
+    rm -f "$DMG"
+    hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+    rm -rf "$STAGE"
+    echo "==> Built $DMG ($(du -h "$DMG" | cut -f1))"
 fi

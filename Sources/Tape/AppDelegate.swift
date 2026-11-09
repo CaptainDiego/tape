@@ -86,6 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         main.addItem(menu("File", [
             item("Share…", #selector(EditorWindow.shareClicked), "s", [.command, .shift]),
             item("Export…", #selector(EditorWindow.exportClicked), "e"),
+            .separator(),
+            item("Move to Trash…", #selector(EditorWindow.trashClicked), "\u{8}"),
+            .separator(),
             item("Close", #selector(NSWindow.performClose(_:)), "w"),
         ]))
         main.addItem(menu("Edit", [
