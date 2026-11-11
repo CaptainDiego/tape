@@ -1,7 +1,10 @@
 // Tape share server.
 //
-// Public, unlisted pages:  GET /v/:id  (anyone with the link can watch)
-// Owner-only API:           /api/*     (Authorization: Bearer UPLOAD_TOKEN)
+// Public, unlisted pages:  GET /recordings/:id  (anyone with the link can watch)
+// Owner-only API:           /api/*             (Authorization: Bearer UPLOAD_TOKEN)
+//
+// Set BASE_PATH (e.g. "/tape") to serve everything under a path on a shared
+// domain: https://example.com/tape/recordings/:id. Old /v/:id links still work.
 //
 // Videos and captions live in a private R2 bucket and are only ever read
 // through this Worker. Share metadata and view counts live in D1.
@@ -10,6 +13,17 @@ interface Env {
   BUCKET: R2Bucket;
   DB: D1Database;
   UPLOAD_TOKEN: string;
+  BASE_PATH?: string;
+}
+
+/** BASE_PATH without a trailing slash: "" or "/tape". */
+function basePath(env: Env): string {
+  const b = (env.BASE_PATH ?? "").replace(/\/+$/, "");
+  return b && !b.startsWith("/") ? "/" + b : b;
+}
+
+function shareURL(url: URL, env: Env, id: string): string {
+  return `${url.origin}${basePath(env)}/recordings/${id}`;
 }
 
 interface Share {
@@ -37,7 +51,13 @@ export default {
 
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const parts = url.pathname.split("/").filter(Boolean);
+  const base = basePath(env);
+  let path = url.pathname;
+  if (base) {
+    if (path !== base && !path.startsWith(base + "/")) return notFound();
+    path = path.slice(base.length) || "/";
+  }
+  const parts = path.split("/").filter(Boolean);
   const method = request.method;
 
   if (parts[0] === "api") {
@@ -45,11 +65,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     return api(request, env, url, parts.slice(1), method);
   }
 
-  if (parts[0] === "v" && parts[1] && ID.test(parts[1])) {
+  if ((parts[0] === "recordings" || parts[0] === "v") && parts[1] && ID.test(parts[1])) {
     const share = await getShare(env, parts[1]);
     if (!share || share.version === 0) return notFound();
     const rest = parts.slice(2).join("/");
-    if (rest === "" && method === "GET") return page(share, url);
+    if (rest === "" && method === "GET") return page(share, url, `${base}/${parts[0]}/${share.id}`);
     if (rest === "video.mp4" && (method === "GET" || method === "HEAD")) return video(request, env, share);
     if (rest === "captions.vtt" && method === "GET") return captionsFile(env, share, "vtt", false);
     const download = rest.match(/^transcript\.(txt|srt|vtt|md)$/);
@@ -61,7 +81,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return notFound();
   }
 
-  if (url.pathname === "/robots.txt") return text("User-agent: *\nDisallow: /\n");
+  if (path === "/robots.txt") return text("User-agent: *\nDisallow: /\n");
   return notFound();
 }
 
@@ -75,7 +95,7 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
     await env.DB.prepare("INSERT INTO shares (id, title, duration, created_at) VALUES (?, ?, ?, ?)")
       .bind(id, cleanTitle(body?.title), Number(body?.duration) || 0, Date.now())
       .run();
-    return json({ id, url: `${url.origin}/v/${id}` }, 201);
+    return json({ id, url: shareURL(url, env, id) }, 201);
   }
 
   if (parts[0] !== "shares" || !parts[1] || !ID.test(parts[1])) return json({ error: "not found" }, 404);
@@ -87,7 +107,7 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
 
   // GET /api/shares/:id  → details and view count
   if (rest.length === 0 && method === "GET") {
-    return json({ id, url: `${url.origin}/v/${id}`, title: share.title, views: share.views,
+    return json({ id, url: shareURL(url, env, id), title: share.title, views: share.views,
                   ready: share.version > 0, updatedAt: share.version || null });
   }
 
@@ -134,7 +154,7 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
       await env.DB.prepare("UPDATE shares SET version = ?, title = ?, duration = ? WHERE id = ?")
         .bind(Date.now(), body.title ? cleanTitle(body.title) : share.title, Number(body.duration) || share.duration, id)
         .run();
-      return json({ id, url: `${url.origin}/v/${id}` });
+      return json({ id, url: shareURL(url, env, id) });
     }
     // DELETE /api/shares/:id/video?upload=…  → abandon a failed upload
     if (rest.length === 1 && method === "DELETE") {
@@ -275,9 +295,8 @@ function toSRT(cues: Cue[]): string {
 
 // MARK: The page
 
-async function page(share: Share, url: URL): Promise<Response> {
+async function page(share: Share, url: URL, base: string): Promise<Response> {
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
-  const base = `/v/${share.id}`;
   const v = share.version;
   const title = escapeHTML(share.title);
   const html = `<!doctype html>

@@ -3,7 +3,13 @@
 name = "tape"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
-workers_dev = true
+workers_dev = false
+preview_urls = false
+
+# Served at https://zeroseat.ai/tape/... through the "apps" Worker (service binding),
+# so share links look like https://zeroseat.ai/tape/recordings/<id>.
+[vars]
+BASE_PATH = "/tape"
 
 [[r2_buckets]]
 binding = "BUCKET"
