@@ -55,6 +55,20 @@ if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < Comma
 // `TAPE_SERVER=… TAPE_TOKEN=… Tape --share <video>` uploads a recording with
 // its saved edits, like the Share button, and prints the link. For testing a
 // server; the token comes from the environment so it stays out of `ps`.
+// Saves the sharing server and token (from TAPE_SERVER / TAPE_TOKEN) the same
+// way the Share dialog does, so a machine can be set up from the terminal.
+if CommandLine.arguments.contains("--configure-sharing") {
+    let env = ProcessInfo.processInfo.environment
+    guard let server = env["TAPE_SERVER"].flatMap(SharingConfig.parseServer), let token = env["TAPE_TOKEN"], !token.isEmpty else {
+        print("error: set TAPE_SERVER and TAPE_TOKEN")
+        exit(1)
+    }
+    SharingConfig.server = server
+    SharingConfig.token = token
+    print(SharingConfig.isConfigured ? "sharing set to \(server.absoluteString)" : "error: couldn't save the token")
+    exit(SharingConfig.isConfigured ? 0 : 1)
+}
+
 if let flag = CommandLine.arguments.firstIndex(of: "--share"), flag + 1 < CommandLine.arguments.count {
     let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
     let env = ProcessInfo.processInfo.environment
