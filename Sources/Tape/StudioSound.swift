@@ -7,9 +7,7 @@ import AudioToolbox
 /// 1. Apple's voice isolation (the model behind FaceTime's Voice Isolation)
 ///    removes keyboard clicks, background noise and room echo.
 /// 2. A broadcast "podcast" tone: chest warmth, a touch of body, a small dip
-///    for clarity, air on top, and gentle 1.7:1 compression. The settings
-///    are CrispVoice's (MIT), tuned in blind tests against a commercial
-///    enhancer.
+///    for clarity, air on top, and gentle 1.7:1 compression.
 /// 3. Podcast loudness (-19 LUFS), with peaks kept under -1.5 dB.
 ///
 /// The result is cached next to the recording and swapped in for the
@@ -24,7 +22,7 @@ enum StudioSound {
 
     static let sampleRate = 48_000.0
     private static let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-    /// Final loudness, in LUFS (what CrispVoice and many podcasts use).
+    /// Final loudness, in LUFS (what many podcasts use).
     private static let targetLoudness = -19.0
 
     static func cacheURL(for video: URL, mode: Mode) -> URL {
@@ -99,7 +97,7 @@ enum StudioSound {
         return unit
     }
 
-    /// CrispVoice's tone: bass shelf +3.5 dB at 160 Hz, +1.5 dB at 400 Hz,
+    /// The podcast tone: bass shelf +3.5 dB at 160 Hz, +1.5 dB at 400 Hz,
     /// -1.5 dB at 280 Hz, high shelves +2.5 dB at 9 kHz and +1 dB at 10 kHz.
     private static func tone() -> AVAudioUnitEQ {
         let eq = AVAudioUnitEQ(numberOfBands: 6)
