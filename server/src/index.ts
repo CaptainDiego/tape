@@ -35,6 +35,11 @@ interface Share {
   views: number;
 }
 
+// Tape's icon (red rounded square, white dot), inline so the tab shows it.
+const FAVICON = "data:image/svg+xml," + encodeURIComponent(
+  "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='#d0402b'/>" +
+  "<circle cx='50' cy='50' r='20' fill='#fff'/></svg>");
+
 const ID = /^[0-9A-Za-z]{12}$/;
 const MAX_CAPTIONS_BYTES = 2 * 1024 * 1024;
 
@@ -310,6 +315,7 @@ async function page(share: Share, url: URL, base: string): Promise<Response> {
 <meta property="og:type" content="video.other">
 <meta property="og:url" content="${escapeHTML(url.origin + base)}">
 <title>${title}</title>
+<link rel="icon" type="image/svg+xml" href="${FAVICON}">
 <style nonce="${nonce}">
 :root { --bg:#fff; --fg:#1d1d1f; --muted:#6e6e73; --line:#e5e5ea; --panel:#f5f5f7; --accent:#0a84ff; --hl:rgba(10,132,255,.14); }
 @media (prefers-color-scheme: dark) { :root { --bg:#111113; --fg:#f5f5f7; --muted:#98989d; --line:#2c2c2e; --panel:#1c1c1e; --hl:rgba(10,132,255,.28); } }
