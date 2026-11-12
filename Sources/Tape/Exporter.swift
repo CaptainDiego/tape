@@ -11,10 +11,10 @@ enum ExportError: LocalizedError {
 /// Renders the edited recording to an H.264 MP4 that plays anywhere,
 /// optionally with the captions drawn into the picture.
 enum Exporter {
-    static func export(source: AVURLAsset, timeline: Timeline, captions: [Caption],
+    static func export(source: AVURLAsset, audio: AVURLAsset? = nil, timeline: Timeline, captions: [Caption],
                        burnCaptions: Bool, to output: URL,
                        progress: @escaping @MainActor (Double) -> Void) async throws {
-        let asset = try await timeline.editedAsset(from: source)
+        let asset = try await timeline.editedAsset(from: source, audio: audio)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality)
         else { throw ExportError.cannotExport }
 

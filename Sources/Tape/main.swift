@@ -27,6 +27,27 @@ if let flag = CommandLine.arguments.firstIndex(of: "--transcribe"), flag + 1 < C
 
 // `Tape --export <video> <out.mp4>` renders a recording with its saved edits
 // and burned-in captions, the same as the Export button.
+// `Tape --studio <video> [clean|studio]` makes the Studio Sound audio and
+// prints where it went.
+if let flag = CommandLine.arguments.firstIndex(of: "--studio"), flag + 1 < CommandLine.arguments.count {
+    let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+    let mode = CommandLine.arguments.dropFirst(flag + 2).first.flatMap(StudioSound.Mode.init) ?? .studio
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        let start = Date()
+        do {
+            try? FileManager.default.removeItem(at: StudioSound.cacheURL(for: source, mode: mode))
+            let url = try await StudioSound.render(source, mode: mode)
+            print(String(format: "%@ (%.1fs)", url.path, Date().timeIntervalSince(start)))
+        } catch {
+            print("error: \(error.localizedDescription)")
+        }
+        done.signal()
+    }
+    done.wait()
+    exit(0)
+}
+
 if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < CommandLine.arguments.count {
     let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
     let output = URL(fileURLWithPath: CommandLine.arguments[flag + 2])
@@ -38,7 +59,9 @@ if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < Comma
             let edits = Edits.load(for: source)
             let timeline = Timeline(edits: edits, words: words, sourceDuration: try await asset.load(.duration).seconds)
             let captions = timeline.captions(words, edits: edits)
-            try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+            var audio: AVURLAsset?
+            if let mode = edits.sound { audio = AVURLAsset(url: try await StudioSound.render(source, mode: mode)) }
+            try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
                                       burnCaptions: true, to: output) { _ in }
             print(String(format: "exported %.1fs (from %.1fs), %d captions", timeline.duration,
                          timeline.sourceDuration, captions.count))
@@ -86,7 +109,9 @@ if let flag = CommandLine.arguments.firstIndex(of: "--share"), flag + 1 < Comman
             let edits = Edits.load(for: source)
             let timeline = Timeline(edits: edits, words: words, sourceDuration: try await asset.load(.duration).seconds)
             let captions = timeline.captions(words, edits: edits)
-            try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+            var audio: AVURLAsset?
+            if let mode = edits.sound { audio = AVURLAsset(url: try await StudioSound.render(source, mode: mode)) }
+            try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
                                       burnCaptions: false, to: temp) { _ in }
             let result = try await ShareClient(server: server, token: token).share(
                 video: temp, vtt: Caption.vtt(captions), title: source.deletingPathExtension().lastPathComponent,

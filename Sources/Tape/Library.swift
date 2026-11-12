@@ -5,6 +5,7 @@ enum Library {
     /// The transcript, edits and share record saved beside a recording.
     static func sidecars(for video: URL) -> [URL] {
         [Transcript.sidecarURL(for: video), Edits.sidecarURL(for: video), ShareRecord.fileURL(for: video)]
+            + StudioSound.cacheFiles(for: video)
     }
 
     /// Moves a recording and its side files to the Trash, so a mistake can

@@ -15,6 +15,8 @@ struct Edits: Codable, Equatable {
     var corrections: [Int: String] = [:]
     /// Sections played faster (or slower), in source time. They never overlap.
     var speeds: [Speed] = []
+    /// Studio Sound: cleaned-up audio instead of the original (nil).
+    var sound: StudioSound.Mode?
 
     struct Speed: Codable, Equatable {
         var start: TimeInterval
@@ -54,6 +56,7 @@ struct Edits: Codable, Equatable {
         cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
         corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
         speeds = try c.decodeIfPresent([Speed].self, forKey: .speeds) ?? []
+        sound = (try? c.decodeIfPresent(String.self, forKey: .sound)).flatMap { $0 }.flatMap(StudioSound.Mode.init)
     }
 
     /// True if the word is cut from the video, by deleting it in the
@@ -203,12 +206,14 @@ struct Timeline {
     }
 
     /// The edited video: the kept pieces of the original, back to back.
-    func editedAsset(from asset: AVURLAsset) async throws -> AVAsset {
-        if isUncut { return asset }
+    /// `audio`, if given, replaces the recording's sound (Studio Sound); it
+    /// must line up with the video from time zero.
+    func editedAsset(from asset: AVURLAsset, audio: AVURLAsset? = nil) async throws -> AVAsset {
+        if isUncut, audio == nil { return asset }
         let composition = AVMutableComposition()
         var tracks: [(AVAssetTrack, AVMutableCompositionTrack)] = []
-        for type in [AVMediaType.video, .audio] {
-            for track in try await asset.loadTracks(withMediaType: type) {
+        for (source, type) in [(asset, AVMediaType.video), (audio ?? asset, .audio)] {
+            for track in try await source.loadTracks(withMediaType: type) {
                 guard let copy = composition.addMutableTrack(withMediaType: type,
                                                              preferredTrackID: kCMPersistentTrackID_Invalid)
                 else { continue }

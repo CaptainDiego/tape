@@ -23,6 +23,11 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
     private let spinner = NSProgressIndicator()
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private let captionsToggle = NSButton(checkboxWithTitle: "Captions", target: nil, action: nil)
+    /// Original, Clean or Studio sound (see StudioSound).
+    private let soundMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The processed audio for the chosen sound, once it's made.
+    private var soundAudio: (mode: StudioSound.Mode, asset: AVURLAsset)?
+    private var processingSound: StudioSound.Mode?
     private let fillersButton = NSButton(title: "Remove Fillers", target: nil, action: nil)
     private let undoButton = NSButton(title: "Undo", target: nil, action: nil)
     private let restoreButton = NSButton(title: "Restore All", target: nil, action: nil)
@@ -206,7 +211,13 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
 
         shareButton.toolTip = "Upload to your own share page and copy the link. Recordings stay on this Mac otherwise."
         trashButton.toolTip = "Move this recording, its transcript and edits to the Trash."
-        let header = NSStackView(views: [title, NSView(), captionsToggle, shareButton, exportButton, trashButton])
+        soundMenu.addItems(withTitles: ["Original Sound"] + StudioSound.Mode.allCases.map { "\($0.title) Sound" })
+        soundMenu.controlSize = .small
+        soundMenu.target = self
+        soundMenu.action = #selector(soundChosen)
+        soundMenu.toolTip = "Clean removes keyboard clicks, background noise and echo, and evens out the volume. "
+            + "Studio also adds a warm podcast tone. Runs on this Mac; the original recording isn't changed."
+        let header = NSStackView(views: [title, NSView(), soundMenu, captionsToggle, shareButton, exportButton, trashButton])
         rewriteButton.toolTip = "Change the text of the selected words in the captions. The video isn't changed."
         let tools = NSStackView(views: [rewriteButton, fillersButton, undoButton, restoreButton])
         let editHint = Self.hint("Select words (double-click selects one), then type to rewrite them in the captions, or press "
@@ -366,6 +377,53 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         if NSMaxRange(selection) <= text.length { transcriptView.setSelectedRange(selection) }
         highlighted = nil
         playheadMoved(to: player.currentTime().seconds)
+    }
+
+    // MARK: Sound
+
+    @objc private func soundChosen() {
+        var new = edits
+        let index = soundMenu.indexOfSelectedItem
+        new.sound = index > 0 ? StudioSound.Mode.allCases[index - 1] : nil
+        apply(new)
+    }
+
+    /// The processed audio for the chosen sound, or nil while it's being
+    /// made (the original plays meanwhile) or when the original is chosen.
+    private func currentSoundAudio() -> AVURLAsset? {
+        guard let mode = edits.sound else { return nil }
+        if let soundAudio, soundAudio.mode == mode { return soundAudio.asset }
+        if let cached = StudioSound.cached(for: file, mode: mode) {
+            soundAudio = (mode, cached)
+            return cached
+        }
+        prepareSound(mode)
+        return nil
+    }
+
+    private func prepareSound(_ mode: StudioSound.Mode) {
+        guard processingSound == nil else { return }
+        processingSound = mode
+        setStatus("Making \(mode.title) Sound…", busy: true)
+        let file = self.file
+        Task {
+            do {
+                let url = try await StudioSound.render(file, mode: mode) { fraction in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.processingSound == mode else { return }
+                        self.setStatus("Making \(mode.title) Sound \(Int(fraction * 100))%…", busy: true)
+                    }
+                }
+                soundAudio = (mode, AVURLAsset(url: url))
+                setStatus(nil, busy: false)
+            } catch {
+                setStatus("\(mode.title) Sound failed: \(error.localizedDescription)", busy: false,
+                          action: ("Try Again", { [weak self] in self?.prepareSound(mode) }))
+            }
+            processingSound = nil
+            // The choice may have changed meanwhile; rebuild picks up whatever is current.
+            rebuild()
+        }
     }
 
     // MARK: Editing
@@ -607,6 +665,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
     @objc private func restoreAll() {
         var new = Edits()
         new.corrections = edits.corrections
+        new.sound = edits.sound
         apply(new)
     }
 
@@ -625,6 +684,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         trimBar.trimEnd = edits.trimEnd ?? duration
         trimBar.cuts = timeline.middleCuts
         trimBar.speeds = edits.speeds
+        soundMenu.selectItem(at: edits.sound.flatMap { StudioSound.Mode.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        let audio = currentSoundAudio()
         renderTranscript()
         updateButtons()
 
@@ -632,7 +693,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         let generation = itemGeneration
         let asset = self.asset
         Task {
-            guard let edited = try? await timeline.editedAsset(from: asset),
+            guard let edited = try? await timeline.editedAsset(from: asset, audio: audio),
                   generation == itemGeneration else { return }
             let wasPlaying = player.rate != 0
             let item = AVPlayerItem(asset: edited)
@@ -666,7 +727,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
                 speedMenu.setTitle("Mixed")
             }
         }
-        exportButton.isEnabled = timeline != nil && !exporting
+        // Export and share wait until the chosen sound is ready.
+        exportButton.isEnabled = timeline != nil && !exporting && (edits.sound == nil || soundAudio?.mode == edits.sound)
         shareButton.isEnabled = exportButton.isEnabled
         trashButton.isEnabled = !exporting
         shareButton.title = shareRecord == nil ? "Share…" : "Shared ▾"
@@ -758,9 +820,10 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         player.pause()
         setStatus("Exporting…", busy: true)
         let captions = self.captions
+        let audio = edits.sound == nil ? nil : soundAudio?.asset
         Task {
             do {
-                try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+                try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
                                           burnCaptions: burnCaptions, to: url) { [weak self] fraction in
                     self?.setStatus("Exporting \(Int(fraction * 100))%…", busy: true)
                 }
@@ -852,13 +915,14 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         player.pause()
         setStatus("Preparing the video…", busy: true)
         let captions = self.captions
+        let audio = edits.sound == nil ? nil : soundAudio?.asset
         let file = self.file
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("tape-share-\(UUID().uuidString).mp4")
         Task {
             do {
                 // Captions go up as a track the viewer can turn off, so the
                 // video itself stays clean.
-                try await Exporter.export(source: asset, timeline: timeline, captions: captions,
+                try await Exporter.export(source: asset, audio: audio, timeline: timeline, captions: captions,
                                           burnCaptions: false, to: temp) { [weak self] fraction in
                     self?.setStatus("Preparing the video \(Int(fraction * 100))%…", busy: true)
                 }
