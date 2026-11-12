@@ -521,7 +521,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         if selectionIsCut {
             new.cuts.removeAll { $0.end > selection.lowerBound && $0.start < selection.upperBound }
             if let words = transcript?.words {
-                new.deletedWords = new.deletedWords.filter { !selection.contains(words[$0].start) }
+                // Saved indices can outlive the transcript (re-transcribed with fewer words).
+                new.deletedWords = new.deletedWords.filter { !words.indices.contains($0) || !selection.contains(words[$0].start) }
             }
         } else {
             new.cuts.append(Edits.Cut(start: selection.lowerBound, end: selection.upperBound))
@@ -671,7 +672,9 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
     private func rebuild() {
         guard let duration = sourceDuration else { return }
         let words = transcript?.words ?? []
-        let sourceNow = timeline?.sourceTime(atPlayback: player.currentTime().seconds) ?? (edits.trimStart ?? 0)
+        // currentTime() is invalid (NaN) before the first item is ready.
+        let now = player.currentTime().seconds
+        let sourceNow = now.isFinite ? timeline?.sourceTime(atPlayback: now) ?? (edits.trimStart ?? 0) : (edits.trimStart ?? 0)
         let timeline = Timeline(edits: edits, words: words, sourceDuration: duration)
         self.timeline = timeline
         captions = timeline.captions(words, edits: edits)
@@ -884,13 +887,18 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         })
         menu.addItem(ActionItem("Open in Browser") { NSWorkspace.shared.open(record.url) })
         menu.addItem(.separator())
-        menu.addItem(ActionItem("Update with Current Edits") { [weak self] in
+        // Shared on a server that's no longer the one in Sharing Settings:
+        // updating or stopping would reach the wrong server.
+        let elsewhere = SharingConfig.server.map { $0 != record.server } ?? true
+        menu.addItem(ActionItem("Update with Current Edits", enabled: !elsewhere) { [weak self] in
             self?.upload(title: record.title, existingID: record.id)
         })
-        menu.addItem(ActionItem("Stop Sharing…") { [weak self] in self?.confirmStopSharing(record) })
+        menu.addItem(ActionItem("Stop Sharing…", enabled: !elsewhere) { [weak self] in self?.confirmStopSharing(record) })
         menu.addItem(.separator())
         menu.addItem(ActionItem("Sharing Settings…") { [weak self] in self?.showSharingSettings(then: nil) })
+        if elsewhere { views.title = "Shared on \(record.server.host ?? "another server")" }
         Task {
+            guard !elsewhere else { return }
             do {
                 let info = try await ShareClient().info(id: record.id)
                 views.title = info.views == 1 ? "1 view" : "\(info.views) views"

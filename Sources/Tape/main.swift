@@ -18,6 +18,7 @@ if let flag = CommandLine.arguments.firstIndex(of: "--transcribe"), flag + 1 < C
             print(String(format: "%d words in %.1fs", transcript.words.count, Date().timeIntervalSince(start)))
         } catch {
             print("error: \(error.localizedDescription)")
+            exit(1)
         }
         done.signal()
     }
@@ -40,6 +41,7 @@ if let flag = CommandLine.arguments.firstIndex(of: "--studio"), flag + 1 < Comma
             print(String(format: "%@ (%.1fs)", url.path, Date().timeIntervalSince(start)))
         } catch {
             print("error: \(error.localizedDescription)")
+            exit(1)
         }
         done.signal()
     }
@@ -67,6 +69,7 @@ if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < Comma
             print(Caption.srt(captions))
         } catch {
             print("error: \(error.localizedDescription)")
+            exit(1)
         }
         done.signal()
     }
@@ -74,9 +77,6 @@ if let flag = CommandLine.arguments.firstIndex(of: "--export"), flag + 2 < Comma
     exit(0)
 }
 
-// `TAPE_SERVER=… TAPE_TOKEN=… Tape --share <video>` uploads a recording with
-// its saved edits, like the Share button, and prints the link. For testing a
-// server; the token comes from the environment so it stays out of `ps`.
 // Saves the sharing server and token (from TAPE_SERVER / TAPE_TOKEN) the same
 // way the Share dialog does, so a machine can be set up from the terminal.
 if CommandLine.arguments.contains("--configure-sharing") {
@@ -91,6 +91,9 @@ if CommandLine.arguments.contains("--configure-sharing") {
     exit(SharingConfig.isConfigured ? 0 : 1)
 }
 
+// `TAPE_SERVER=… TAPE_TOKEN=… Tape --share <video>` uploads a recording with
+// its saved edits, like the Share button, and prints the link. For testing a
+// server; the token comes from the environment so it stays out of `ps`.
 if let flag = CommandLine.arguments.firstIndex(of: "--share"), flag + 1 < CommandLine.arguments.count {
     let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
     let env = ProcessInfo.processInfo.environment
@@ -118,6 +121,7 @@ if let flag = CommandLine.arguments.firstIndex(of: "--share"), flag + 1 < Comman
             print(result.url.absoluteString)
         } catch {
             print("error: \(error.localizedDescription)")
+            exit(1)
         }
         done.signal()
     }

@@ -52,18 +52,29 @@ enum StudioSound {
         let output = cacheURL(for: video, mode: mode)
         if FileManager.default.fileExists(atPath: output.path) { return output }
         let task = Task.detached(priority: .userInitiated) {
-            var samples = try await readMono(video)
-            progress(0.15)
-            samples = try process(samples, through: [isolation(), tone()]) { progress(0.15 + $0 * 0.7) }
-            // Compress at a known level, so quiet and loud recordings get the
-            // same amount of it.
-            apply(gainDB: Float(-24 - loudness(samples)), to: &samples)
-            compress(&samples, thresholdDB: -20, ratio: 1.7, attack: 0.012, release: 0.22)
-            apply(gainDB: Float(targetLoudness - loudness(samples)), to: &samples)
-            limit(&samples)
+            // Three streaming passes through temporary files, so memory stays
+            // small however long the recording is.
+            let temp = FileManager.default.temporaryDirectory
+            let shaped = temp.appendingPathComponent("tape-\(UUID().uuidString).caf")
+            let compressed = temp.appendingPathComponent("tape-\(UUID().uuidString).caf")
             let partial = output.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).m4a")
-            defer { try? FileManager.default.removeItem(at: partial) }
-            try write(samples, to: partial)
+            defer { [shaped, compressed, partial].forEach { try? FileManager.default.removeItem(at: $0) } }
+
+            // 1. Voice isolation and tone.
+            let shapedLoudness = try await isolateAndShape(video, to: shaped) { progress($0 * 0.8) }
+            // 2. Compress at a known level, so quiet and loud recordings get
+            //    the same amount of it.
+            var compressor = Compressor(thresholdDB: -20, ratio: 1.7, attack: 0.012, release: 0.22)
+            let preGain = gain(-24 - shapedLoudness)
+            let compressedLoudness = try transform(shaped, to: compressed, encoded: false) { samples in
+                for i in samples.indices { samples[i] = compressor.process(samples[i] * preGain) }
+            }
+            progress(0.9)
+            // 3. Podcast loudness, peaks kept under -1.5 dB, encoded to AAC.
+            let finalGain = gain(targetLoudness - compressedLoudness)
+            _ = try transform(compressed, to: partial, encoded: true) { samples in
+                for i in samples.indices { samples[i] = limit(samples[i] * finalGain) }
+            }
             try? FileManager.default.removeItem(at: output)
             try FileManager.default.moveItem(at: partial, to: output)
             progress(1)
@@ -110,148 +121,217 @@ enum StudioSound {
         return eq
     }
 
-    // MARK: Reading and writing
+    // MARK: Passes
 
-    /// The recording's audio as 48 kHz mono, starting at the video's time
-    /// zero (silence first if the microphone started late).
-    private static func readMono(_ video: URL) async throws -> [Float] {
+    /// Reads the recording's audio as 48 kHz mono, starting at the video's
+    /// time zero (silence first if the microphone started late), runs it
+    /// through voice isolation and the tone EQ, and writes it to `output`.
+    /// Returns its loudness.
+    private static func isolateAndShape(_ video: URL, to output: URL, progress: (Double) -> Void) async throws -> Double {
         let asset = AVURLAsset(url: video)
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else { throw TranscriberError.noAudio }
+        let duration = try await asset.load(.duration).seconds
         let reader = try AVAssetReader(asset: asset)
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+        let trackOutput = AVAssetReaderTrackOutput(track: track, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1,
             AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true,
             AVLinearPCMIsNonInterleaved: false, AVLinearPCMIsBigEndianKey: false,
         ])
-        reader.add(output)
+        reader.add(trackOutput)
         guard reader.startReading() else { throw reader.error ?? TranscriberError.noAudio }
-        var samples: [Float] = []
+
+        var meter = LoudnessMeter()
+        let chain = try OfflineChain(effects: [isolation(), tone()], output: output) { meter.add($0) }
+        let total = max(duration * sampleRate, 1)
         var first = true
-        while let buffer = output.copyNextSampleBuffer() {
+        while let sample = trackOutput.copyNextSampleBuffer() {
             if first {
                 first = false
-                let lead = Int(max(0, CMSampleBufferGetPresentationTimeStamp(buffer).seconds) * sampleRate)
-                samples.append(contentsOf: repeatElement(0, count: lead))
+                let lead = Int(max(0, CMSampleBufferGetPresentationTimeStamp(sample).seconds) * sampleRate)
+                if lead > 0, let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(lead)) {
+                    silence.frameLength = AVAudioFrameCount(lead)
+                    silence.floatChannelData![0].update(repeating: 0, count: lead)
+                    chain.schedule(silence)
+                }
             }
-            let frames = CMSampleBufferGetNumSamples(buffer)
-            guard frames > 0, let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
-            let start = samples.count
-            samples.append(contentsOf: repeatElement(0, count: frames))
-            samples.withUnsafeMutableBufferPointer { out in
-                _ = CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: frames * 4,
-                                               destination: out.baseAddress! + start)
-            }
+            let frames = CMSampleBufferGetNumSamples(sample)
+            guard frames > 0, let block = CMSampleBufferGetDataBuffer(sample),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))
+            else { continue }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: frames * 4, destination: buffer.floatChannelData![0])
+            chain.schedule(buffer)
+            try chain.renderScheduled()
+            progress(min(Double(chain.scheduled) / total, 1))
         }
         if reader.status == .failed { throw reader.error ?? TranscriberError.noAudio }
-        return samples
+        try chain.finish()
+        return meter.loudness
     }
 
-    private static func write(_ samples: [Float], to url: URL) throws {
-        let file = try AVAudioFile(forWriting: url, settings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1,
-            AVEncoderBitRateKey: 160_000,
-        ], commonFormat: .pcmFormatFloat32, interleaved: false)
-        let chunk = 65_536
-        var position = 0
-        while position < samples.count {
-            let count = min(chunk, samples.count - position)
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count))!
-            buffer.frameLength = AVAudioFrameCount(count)
-            samples.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress! + position, count: count) }
+    /// Streams a float file through `body` in blocks into `output` (a float
+    /// file, or AAC when `encoded`) and returns the loudness of the result.
+    private static func transform(_ input: URL, to output: URL, encoded: Bool,
+                                  _ body: (inout UnsafeMutableBufferPointer<Float>) -> Void) throws -> Double {
+        let source = try AVAudioFile(forReading: input, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let settings: [String: Any] = encoded
+            ? [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1,
+               AVEncoderBitRateKey: 160_000]
+            : format.settings
+        let file = try AVAudioFile(forWriting: output, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let buffer = AVAudioPCMBuffer(pcmFormat: source.processingFormat, frameCapacity: 65_536)!
+        var meter = LoudnessMeter()
+        while source.framePosition < source.length {
+            try source.read(into: buffer)
+            if buffer.frameLength == 0 { break }
+            var samples = UnsafeMutableBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength))
+            body(&samples)
+            meter.add(UnsafeBufferPointer(samples))
             try file.write(from: buffer)
-            position += count
+        }
+        return meter.loudness
+    }
+
+    // MARK: Dynamics
+
+    private static func gain(_ db: Double) -> Float {
+        Float(pow(10, min(max(db, -20), 30) / 20))
+    }
+
+    /// Leaves everything under -3 dB alone and bends louder peaks smoothly
+    /// toward -1.5 dB, so nothing clips.
+    private static func limit(_ x: Float) -> Float {
+        let knee: Float = 0.708, ceiling: Float = 0.84
+        let magnitude = abs(x)
+        guard magnitude > knee else { return x }
+        let bent = knee + (ceiling - knee) * tanh((magnitude - knee) / (ceiling - knee))
+        return x < 0 ? -bent : bent
+    }
+
+    fileprivate static var monoFormat: AVAudioFormat { format }
+}
+
+/// A smooth feed-forward compressor, like ffmpeg's acompressor.
+private struct Compressor {
+    private let threshold: Float, slope: Float, attack: Float, release: Float
+    private var envelope: Float = 0
+
+    init(thresholdDB: Float, ratio: Float, attack: Float, release: Float) {
+        let sr = Float(StudioSound.sampleRate)
+        threshold = thresholdDB
+        slope = 1 - 1 / ratio
+        self.attack = exp(-1 / (attack * sr))
+        self.release = exp(-1 / (release * sr))
+    }
+
+    mutating func process(_ x: Float) -> Float {
+        let level = abs(x)
+        let c = level > envelope ? attack : release
+        envelope = c * envelope + (1 - c) * level
+        let over = 20 * log10(max(envelope, 1e-9)) - threshold
+        return over > 0 ? x * pow(10, -over * slope / 20) : x
+    }
+}
+
+/// Speech loudness, close to LUFS: gated 400 ms blocks with 50% overlap
+/// (without the K-weighting filter, which barely matters for a voice).
+/// Keeps only one number per 200 ms, so it streams.
+private struct LoudnessMeter {
+    private let step = Int(StudioSound.sampleRate * 0.2)
+    private var sum = 0.0
+    private var count = 0
+    private var steps: [Double] = []  // mean square of each 200 ms
+
+    mutating func add(_ samples: UnsafeBufferPointer<Float>) {
+        for s in samples {
+            sum += Double(s) * Double(s)
+            count += 1
+            if count == step {
+                steps.append(sum / Double(count))
+                sum = 0
+                count = 0
+            }
         }
     }
 
-    // MARK: Processing
+    var loudness: Double {
+        let blocks = zip(steps, steps.dropFirst()).map { ($0 + $1) / 2 }
+        func db(_ meanSquare: Double) -> Double { 10 * log10(max(meanSquare, 1e-12)) }
+        let audible = blocks.filter { db($0) > -70 }
+        guard !audible.isEmpty else { return -19 }
+        let average = audible.reduce(0, +) / Double(audible.count)
+        let gated = audible.filter { db($0) > db(average) - 10 }
+        return db(gated.reduce(0, +) / Double(max(gated.count, 1)))
+    }
+}
 
-    /// Runs the samples through audio units faster than real time. The
-    /// units' latency is trimmed, so the result lines up with the input.
-    private static func process(_ input: [Float], through effects: [AVAudioUnit],
-                                progress: (Double) -> Void) throws -> [Float] {
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
+/// Audio units run faster than real time: buffers go in, the processed
+/// audio is written to a float file, with the units' latency trimmed off so
+/// it lines up with the input.
+private final class OfflineChain {
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let file: AVAudioFile
+    private let rendered: AVAudioPCMBuffer
+    private let latency: AVAudioFramePosition
+    private var toSkip: AVAudioFramePosition
+    private let onSamples: (UnsafeBufferPointer<Float>) -> Void
+    private(set) var scheduled: AVAudioFramePosition = 0
+
+    init(effects: [AVAudioUnit], output: URL, onSamples: @escaping (UnsafeBufferPointer<Float>) -> Void) throws {
+        let format = StudioSound.monoFormat
+        self.onSamples = onSamples
         let nodes: [AVAudioNode] = [player] + effects
         nodes.forEach(engine.attach)
         for (from, to) in zip(nodes, nodes.dropFirst()) { engine.connect(from, to: to, format: format) }
         engine.connect(nodes.last!, to: engine.mainMixerNode, format: format)
         try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 4096)
         try engine.start()
-        defer { engine.stop() }
-
-        let latency = Int((effects.map(\.auAudioUnit.latency).reduce(0, +) * sampleRate).rounded())
-        // The input plus enough silence to flush the latency out.
-        let padded = input.count + latency
-        let source = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(padded, 1)))!
-        source.frameLength = AVAudioFrameCount(padded)
-        let channel = source.floatChannelData![0]
-        input.withUnsafeBufferPointer { channel.update(from: $0.baseAddress!, count: input.count) }
-        (channel + input.count).update(repeating: 0, count: latency)
-        player.scheduleBuffer(source, completionHandler: nil)
         player.play()
+        latency = AVAudioFramePosition((effects.map(\.auAudioUnit.latency).reduce(0, +) * StudioSound.sampleRate).rounded())
+        toSkip = latency
+        rendered = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: engine.manualRenderingMaximumFrameCount)!
+        file = try AVAudioFile(forWriting: output, settings: format.settings, commonFormat: .pcmFormatFloat32,
+                               interleaved: false)
+    }
 
-        var output: [Float] = []
-        output.reserveCapacity(padded)
-        let rendered = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: engine.manualRenderingMaximumFrameCount)!
-        while engine.manualRenderingSampleTime < padded {
-            let frames = AVAudioFrameCount(min(Int64(rendered.frameCapacity), Int64(padded) - engine.manualRenderingSampleTime))
+    func schedule(_ buffer: AVAudioPCMBuffer) {
+        player.scheduleBuffer(buffer, completionHandler: nil)
+        scheduled += AVAudioFramePosition(buffer.frameLength)
+    }
+
+    /// Renders what's been scheduled, staying a little behind so the player
+    /// never runs dry mid-stream.
+    func renderScheduled() throws { try render(upTo: max(0, scheduled - 8192)) }
+
+    /// Renders the rest, with silence to flush the latency out.
+    func finish() throws {
+        let tail = Int(latency)
+        if tail > 0, let silence = AVAudioPCMBuffer(pcmFormat: StudioSound.monoFormat, frameCapacity: AVAudioFrameCount(tail)) {
+            silence.frameLength = AVAudioFrameCount(tail)
+            silence.floatChannelData![0].update(repeating: 0, count: tail)
+            player.scheduleBuffer(silence, completionHandler: nil)
+        }
+        try render(upTo: scheduled + latency)
+        engine.stop()
+    }
+
+    private func render(upTo target: AVAudioFramePosition) throws {
+        while engine.manualRenderingSampleTime < target {
+            let frames = AVAudioFrameCount(min(Int64(rendered.frameCapacity), target - engine.manualRenderingSampleTime))
             guard try engine.renderOffline(frames, to: rendered) == .success else { break }
-            output.append(contentsOf: UnsafeBufferPointer(start: rendered.floatChannelData![0], count: Int(rendered.frameLength)))
-            progress(Double(output.count) / Double(padded))
-        }
-        return Array(output.dropFirst(latency).prefix(input.count))
-    }
-
-    /// Speech loudness, close to LUFS: gated 400 ms blocks (without the
-    /// K-weighting filter, which barely matters for a voice).
-    static func loudness(_ samples: [Float]) -> Double {
-        let size = Int(sampleRate * 0.4)
-        var blocks: [Double] = []
-        var i = 0
-        while i + size <= samples.count {
-            var sum = 0.0
-            for s in samples[i..<(i + size)] { sum += Double(s) * Double(s) }
-            blocks.append(sum / Double(size))
-            i += size / 2  // 50% overlap
-        }
-        func db(_ meanSquare: Double) -> Double { 10 * log10(max(meanSquare, 1e-12)) }
-        let audible = blocks.filter { db($0) > -70 }
-        guard !audible.isEmpty else { return targetLoudness }
-        let average = audible.reduce(0, +) / Double(audible.count)
-        let gated = audible.filter { db($0) > db(average) - 10 }
-        return db(gated.reduce(0, +) / Double(max(gated.count, 1)))
-    }
-
-    private static func apply(gainDB: Float, to samples: inout [Float]) {
-        let gain = pow(10, min(max(gainDB, -20), 30) / 20)
-        for i in samples.indices { samples[i] *= gain }
-    }
-
-    /// A smooth feed-forward compressor, like ffmpeg's acompressor.
-    private static func compress(_ samples: inout [Float], thresholdDB: Float, ratio: Float,
-                                 attack: Float, release: Float) {
-        let sr = Float(sampleRate)
-        let attackCoefficient = exp(-1 / (attack * sr)), releaseCoefficient = exp(-1 / (release * sr))
-        let slope = 1 - 1 / ratio
-        var envelope: Float = 0
-        for i in samples.indices {
-            let level = abs(samples[i])
-            let c = level > envelope ? attackCoefficient : releaseCoefficient
-            envelope = c * envelope + (1 - c) * level
-            let over = 20 * log10(max(envelope, 1e-9)) - thresholdDB
-            if over > 0 { samples[i] *= pow(10, -over * slope / 20) }
-        }
-    }
-
-    /// Leaves everything under -3 dB alone and bends louder peaks smoothly
-    /// toward -1.5 dB, so nothing clips.
-    private static func limit(_ samples: inout [Float]) {
-        let knee: Float = 0.708, ceiling: Float = 0.84
-        for i in samples.indices {
-            let magnitude = abs(samples[i])
-            guard magnitude > knee else { continue }
-            let bent = knee + (ceiling - knee) * tanh((magnitude - knee) / (ceiling - knee))
-            samples[i] = samples[i] < 0 ? -bent : bent
+            var samples = UnsafeBufferPointer(start: rendered.floatChannelData![0], count: Int(rendered.frameLength))
+            if toSkip > 0 {
+                let skip = min(Int(toSkip), samples.count)
+                toSkip -= AVAudioFramePosition(skip)
+                samples = UnsafeBufferPointer(rebasing: samples[skip...])
+                if samples.isEmpty { continue }
+            }
+            let out = AVAudioPCMBuffer(pcmFormat: StudioSound.monoFormat, frameCapacity: AVAudioFrameCount(samples.count))!
+            out.frameLength = AVAudioFrameCount(samples.count)
+            out.floatChannelData![0].update(from: samples.baseAddress!, count: samples.count)
+            onSamples(samples)
+            try file.write(from: out)
         }
     }
 }

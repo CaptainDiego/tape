@@ -77,7 +77,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     const share = await getShare(env, parts[1]);
     if (!share || share.version === 0) return notFound();
     const rest = parts.slice(2).join("/");
-    if (rest === "" && method === "GET") return page(share, url, `${base}/${parts[0]}/${share.id}`);
+    if (rest === "" && (method === "GET" || method === "HEAD")) {
+      const response = await page(share, url, `${base}/${parts[0]}/${share.id}`);
+      // Some link unfurlers ask with HEAD first.
+      return method === "HEAD" ? new Response(null, { status: response.status, headers: response.headers }) : response;
+    }
     if (rest === "video.mp4" && (method === "GET" || method === "HEAD")) return video(request, env, share);
     if (rest === "captions.vtt" && method === "GET") return captionsFile(env, share, "vtt", false);
     if (rest === "poster.jpg" && (method === "GET" || method === "HEAD")) return poster(env, share);
@@ -130,9 +134,12 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
 
   // PUT /api/shares/:id/captions  (WebVTT body)
   if (rest.length === 1 && rest[0] === "captions" && method === "PUT") {
-    const body = await request.text();
-    if (body.length > MAX_CAPTIONS_BYTES || !body.startsWith("WEBVTT")) return json({ error: "bad captions" }, 400);
-    await env.BUCKET.put(`shares/${id}/captions.vtt`, body, { httpMetadata: { contentType: "text/vtt; charset=utf-8" } });
+    const body = await request.arrayBuffer();
+    const head = new TextDecoder().decode(body.slice(0, 6));
+    if (body.byteLength > MAX_CAPTIONS_BYTES || head !== "WEBVTT") return json({ error: "bad captions" }, 400);
+    // Staged until the video finishes, so viewers never get new captions on the old video.
+    await env.BUCKET.put(`shares/${id}/pending/captions.vtt`, body,
+                         { httpMetadata: { contentType: "text/vtt; charset=utf-8" } });
     return new Response(null, { status: 204 });
   }
 
@@ -141,7 +148,7 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
     const body = await request.arrayBuffer();
     const bytes = new Uint8Array(body);
     if (body.byteLength > MAX_POSTER_BYTES || bytes[0] !== 0xff || bytes[1] !== 0xd8) return json({ error: "bad poster" }, 400);
-    await env.BUCKET.put(`shares/${id}/poster.jpg`, body, { httpMetadata: { contentType: "image/jpeg" } });
+    await env.BUCKET.put(`shares/${id}/pending/poster.jpg`, body, { httpMetadata: { contentType: "image/jpeg" } });
     return new Response(null, { status: 204 });
   }
 
@@ -169,6 +176,7 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
     if (rest.length === 2 && rest[1] === "complete" && method === "POST") {
       const body = await request.json<{ parts: R2UploadedPart[]; title?: string; duration?: number }>();
       await upload.complete(body.parts);
+      await promotePending(env, id);
       await env.DB.prepare("UPDATE shares SET version = ?, title = ?, duration = ? WHERE id = ?")
         .bind(Date.now(), body.title ? cleanTitle(body.title) : share.title, Number(body.duration) || share.duration, id)
         .run();
@@ -177,10 +185,28 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
     // DELETE /api/shares/:id/video?upload=…  → abandon a failed upload
     if (rest.length === 1 && method === "DELETE") {
       await upload.abort();
+      await discardPending(env, id);
       return new Response(null, { status: 204 });
     }
   }
   return json({ error: "not found" }, 404);
+}
+
+// Captions and the poster are uploaded before the video but only go live
+// with it, so a failed update leaves the old version whole.
+const STAGED = ["captions.vtt", "poster.jpg"];
+
+async function promotePending(env: Env, id: string): Promise<void> {
+  for (const name of STAGED) {
+    const staged = await env.BUCKET.get(`shares/${id}/pending/${name}`);
+    if (!staged) continue;
+    await env.BUCKET.put(`shares/${id}/${name}`, await staged.arrayBuffer(), { httpMetadata: staged.httpMetadata });
+  }
+  await discardPending(env, id);
+}
+
+async function discardPending(env: Env, id: string): Promise<void> {
+  await env.BUCKET.delete(STAGED.map((name) => `shares/${id}/pending/${name}`));
 }
 
 async function authorized(request: Request, env: Env): Promise<boolean> {
@@ -220,7 +246,13 @@ async function getShare(env: Env, id: string): Promise<Share | null> {
 
 async function video(request: Request, env: Env, share: Share): Promise<Response> {
   const key = `shares/${share.id}/video.mp4`;
-  const object = await env.BUCKET.get(key, { range: request.headers, onlyIf: request.headers });
+  let object: R2Object | R2ObjectBody | null;
+  try {
+    object = await env.BUCKET.get(key, { range: request.headers, onlyIf: request.headers });
+  } catch {
+    // R2 throws on a range past the end of the file.
+    return new Response(null, { status: 416, headers: securityHeaders() });
+  }
   if (!object) return notFound();
   const headers = new Headers({
     "Content-Type": "video/mp4",
@@ -283,10 +315,15 @@ function parseVTT(vtt: string): Cue[] {
     const at = lines.findIndex((l) => l.includes("-->"));
     if (at < 0) continue;
     const [a, b] = lines[at].split("-->").map((s) => s.trim().split(/\s+/)[0]);
-    const text = lines.slice(at + 1).join("\n").trim();
+    const text = unescapeVTT(lines.slice(at + 1).join("\n").trim());
     if (text) cues.push({ start: seconds(a), end: seconds(b), text });
   }
   return cues;
+}
+
+/** Tape escapes &, < and > in cue text (WebVTT would read them as tags). */
+function unescapeVTT(text: string): string {
+  return text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 
 function seconds(stamp: string): number {
@@ -426,7 +463,7 @@ main.no-transcript aside { display:none; }
       if (at < 0) return null;
       const [a, b] = lines[at].split("-->").map((s) => s.trim().split(/\\s+/)[0].split(":").map(Number));
       const sec = (p) => p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p[0] * 60 + p[1];
-      const text = lines.slice(at + 1).join(" ").trim();
+      const text = lines.slice(at + 1).join(" ").trim().replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
       return text ? { start: sec(a), end: sec(b), text } : null;
     }).filter(Boolean);
     list.replaceChildren();

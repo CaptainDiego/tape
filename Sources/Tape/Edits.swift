@@ -293,6 +293,14 @@ struct Caption: Equatable {
         }.joined(separator: "\n")
     }
 
+    /// Cue text with the characters WebVTT would read as markup escaped
+    /// ("x < y" or "<laughs>" would vanish otherwise), and no "-->", which
+    /// would read as a timing line.
+    private static func escape(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "--&gt;", with: "→")
+    }
+
     /// WebVTT, for the captions track on a shared page.
     static func vtt(_ captions: [Caption]) -> String {
         func stamp(_ t: TimeInterval) -> String {
@@ -301,7 +309,7 @@ struct Caption: Equatable {
         }
         return "WEBVTT\n\n" + captions.map { c in
             // "-->" inside the text would read as a timing line.
-            "\(stamp(c.start)) --> \(stamp(c.end))\n\(c.text.replacingOccurrences(of: "-->", with: "→"))\n"
+            "\(stamp(c.start)) --> \(stamp(c.end))\n\(escape(c.text))\n"
         }.joined(separator: "\n")
     }
 
