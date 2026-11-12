@@ -14,9 +14,9 @@ enum TranscriberError: LocalizedError {
     }
 }
 
-/// Runs Parakeet v3 on this Mac. It loads the same model files Murmur
-/// downloaded. Nothing goes online unless the user explicitly asks to
-/// download a missing model.
+/// Runs Parakeet v3 on this Mac, from FluidAudio's shared model folder.
+/// Nothing goes online unless the user explicitly asks to download a
+/// missing model.
 actor Transcriber {
     static let shared = Transcriber()
     static let modelName = "parakeet-tdt-0.6b-v3"

@@ -5,8 +5,8 @@ let package = Package(
     name: "Tape",
     platforms: [.macOS(.v15)],
     dependencies: [
-        // Same Parakeet runtime as Murmur, so both apps share the model files
-        // in ~/Library/Application Support/FluidAudio/Models. Optional traits
+        // Runs Parakeet on the Mac. Models live in FluidAudio's shared folder,
+        // ~/Library/Application Support/FluidAudio/Models. Optional traits
         // (TTS, diarization, text normalization) are left out.
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.18.2", traits: [])
     ],

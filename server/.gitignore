@@ -1,5 +1,4 @@
 node_modules/
 .wrangler/
 .dev.vars
-wrangler.zeroseat.toml
 wrangler.local.toml
