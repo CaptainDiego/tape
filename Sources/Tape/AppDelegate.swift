@@ -195,6 +195,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .idle:
             menu.addItem(ActionItem("Record Full Screen") { [weak self] in self?.beginRecording(selectArea: false) })
             menu.addItem(ActionItem("Record Area…") { [weak self] in self?.beginRecording(selectArea: true) })
+            // One click to leave yourself out (or back in); the Camera submenu picks which one.
+            menu.addItem(ActionItem("Record Camera", checked: settings.cameraID != nil) { [weak self] in
+                guard let settings = self?.settings else { return }
+                if settings.cameraID != nil {
+                    settings.lastCameraID = settings.cameraID
+                    settings.cameraID = nil
+                } else {
+                    settings.cameraID = settings.lastCameraID.flatMap { AVCaptureDevice(uniqueID: $0)?.uniqueID }
+                        ?? AVCaptureDevice.default(for: .video)?.uniqueID
+                }
+            })
         case .starting: menu.addItem(ActionItem("Starting…", enabled: false) {})
         case .saving: menu.addItem(ActionItem("Saving…", enabled: false) {})
         case .recording: break

@@ -65,6 +65,12 @@ final class Settings {
         set { defaults.set(newValue ?? "", forKey: "cameraID") }
     }
 
+    /// The camera that was on before "Record Camera" was unticked.
+    var lastCameraID: String? {
+        get { defaults.string(forKey: "lastCameraID") }
+        set { defaults.set(newValue, forKey: "lastCameraID") }
+    }
+
     var micID: String? {
         get { deviceID(forKey: "micID", fallback: AVCaptureDevice.default(for: .audio)) }
         set { defaults.set(newValue ?? "", forKey: "micID") }
