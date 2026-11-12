@@ -1,15 +1,18 @@
 # Tape share server: one Worker, one private R2 bucket, one small D1 table.
-# Setup steps are in ../docs/sharing-plan.md ("Deploying").
+# Setup steps are in README.md, or ask Claude Code to "deploy the share server".
+#
+# To keep your own settings (a custom domain, BASE_PATH) out of git, copy this
+# file to wrangler.local.toml (git-ignored) and deploy with
+# `npx wrangler deploy -c wrangler.local.toml`.
 name = "tape"
 main = "src/index.ts"
 compatibility_date = "2026-11-01"
-workers_dev = false
-preview_urls = false
+workers_dev = true  # gives https://tape.<your-subdomain>.workers.dev
 
-# Served at https://zeroseat.ai/tape/... through the "apps" Worker (service binding),
-# so share links look like https://zeroseat.ai/tape/recordings/<id>.
+# Optional: serve under a path on a domain you already use, e.g. "/tape" for
+# https://example.com/tape/recordings/<id>. Leave empty to serve from the root.
 [vars]
-BASE_PATH = "/tape"
+BASE_PATH = ""
 
 [[r2_buckets]]
 binding = "BUCKET"
@@ -19,7 +22,7 @@ bucket_name = "tape-shares"
 binding = "DB"
 database_name = "tape"
 # Replace with the id `npx wrangler d1 create tape` prints.
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
 # Secret, set with `npx wrangler secret put UPLOAD_TOKEN` (and in .dev.vars
 # for local development). Never put it in this file.
