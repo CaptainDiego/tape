@@ -40,8 +40,11 @@ const FAVICON = "data:image/svg+xml," + encodeURIComponent(
   "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='#d0402b'/>" +
   "<circle cx='50' cy='50' r='20' fill='#fff'/></svg>");
 
+import CARD from "./card.png";
+
 const ID = /^[0-9A-Za-z]{12}$/;
 const MAX_CAPTIONS_BYTES = 2 * 1024 * 1024;
+const MAX_POSTER_BYTES = 2 * 1024 * 1024;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -77,6 +80,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (rest === "" && method === "GET") return page(share, url, `${base}/${parts[0]}/${share.id}`);
     if (rest === "video.mp4" && (method === "GET" || method === "HEAD")) return video(request, env, share);
     if (rest === "captions.vtt" && method === "GET") return captionsFile(env, share, "vtt", false);
+    if (rest === "poster.jpg" && (method === "GET" || method === "HEAD")) return poster(env, share);
     const download = rest.match(/^transcript\.(txt|srt|vtt|md)$/);
     if (download && method === "GET") return captionsFile(env, share, download[1] as Format, true);
     if (rest === "view" && method === "POST") {
@@ -129,6 +133,15 @@ async function api(request: Request, env: Env, url: URL, parts: string[], method
     const body = await request.text();
     if (body.length > MAX_CAPTIONS_BYTES || !body.startsWith("WEBVTT")) return json({ error: "bad captions" }, 400);
     await env.BUCKET.put(`shares/${id}/captions.vtt`, body, { httpMetadata: { contentType: "text/vtt; charset=utf-8" } });
+    return new Response(null, { status: 204 });
+  }
+
+  // PUT /api/shares/:id/poster  (JPEG body): the link-preview image
+  if (rest.length === 1 && rest[0] === "poster" && method === "PUT") {
+    const body = await request.arrayBuffer();
+    const bytes = new Uint8Array(body);
+    if (body.byteLength > MAX_POSTER_BYTES || bytes[0] !== 0xff || bytes[1] !== 0xd8) return json({ error: "bad poster" }, 400);
+    await env.BUCKET.put(`shares/${id}/poster.jpg`, body, { httpMetadata: { contentType: "image/jpeg" } });
     return new Response(null, { status: 204 });
   }
 
@@ -304,6 +317,12 @@ async function page(share: Share, url: URL, base: string): Promise<Response> {
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
   const v = share.version;
   const title = escapeHTML(share.title);
+  const absolute = url.origin + base;
+  const image = `${absolute}/poster.jpg?v=${v}`;
+  const videoURL = `${absolute}/video.mp4?v=${v}`;
+  const description = share.duration > 0
+    ? `${formatDuration(share.duration)} video with a transcript, recorded with Tape.`
+    : "A video with a transcript, recorded with Tape.";
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -311,9 +330,21 @@ async function page(share: Share, url: URL, base: string): Promise<Response> {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
+<meta property="og:site_name" content="Tape">
 <meta property="og:title" content="${title}">
+<meta property="og:description" content="${escapeHTML(description)}">
 <meta property="og:type" content="video.other">
 <meta property="og:url" content="${escapeHTML(url.origin + base)}">
+<meta property="og:image" content="${escapeHTML(image)}">
+<meta property="og:image:alt" content="${title}">
+<meta property="og:video" content="${escapeHTML(videoURL)}">
+<meta property="og:video:secure_url" content="${escapeHTML(videoURL)}">
+<meta property="og:video:type" content="video/mp4">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${title}">
+<meta name="twitter:description" content="${escapeHTML(description)}">
+<meta name="twitter:image" content="${escapeHTML(image)}">
+<meta name="description" content="${escapeHTML(description)}">
 <title>${title}</title>
 <link rel="icon" type="image/svg+xml" href="${FAVICON}">
 <style nonce="${nonce}">
@@ -356,7 +387,7 @@ main.no-transcript aside { display:none; }
   <section>
     <h1>${title}</h1>
     <p class="meta">${formatDuration(share.duration)} · ${new Date(share.version).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })}</p>
-    <video id="video" controls playsinline preload="metadata" crossorigin="anonymous" src="${base}/video.mp4?v=${v}">
+    <video id="video" controls playsinline preload="metadata" crossorigin="anonymous" poster="${base}/poster.jpg?v=${v}" src="${base}/video.mp4?v=${v}">
       <track kind="captions" src="${base}/captions.vtt?v=${v}" srclang="en" label="Captions" default>
     </video>
     <div class="controls">
@@ -528,6 +559,18 @@ function json(data: unknown, status = 200): Response {
 
 function text(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "Content-Type": "text/plain; charset=utf-8", ...securityHeaders() } });
+}
+
+/** The share's preview image, or the generic Tape card if it has none. */
+async function poster(env: Env, share: Share): Promise<Response> {
+  const object = await env.BUCKET.get(`shares/${share.id}/poster.jpg`);
+  const headers = new Headers({ "Cache-Control": "public, max-age=86400", ...securityHeaders() });
+  if (object) {
+    headers.set("Content-Type", "image/jpeg");
+    return new Response(object.body, { headers });
+  }
+  headers.set("Content-Type", "image/png");
+  return new Response(CARD, { headers });
 }
 
 function notFound(): Response {

@@ -146,6 +146,10 @@ struct ShareClient {
             id = try JSONDecoder().decode(Created.self, from: try await send("POST", "api/shares", body: body)).id
         }
         _ = try await send("PUT", "api/shares/\(id)/captions", body: Data(vtt.utf8), contentType: "text/vtt")
+        // The link preview (Messenger, X, iMessage). A missing one isn't worth failing the share.
+        if let poster = await Poster.jpeg(from: video) {
+            _ = try? await send("PUT", "api/shares/\(id)/poster", body: poster, contentType: "image/jpeg")
+        }
 
         let upload = try JSONDecoder().decode(Upload.self, from: try await send("POST", "api/shares/\(id)/video"))
         let query = [URLQueryItem(name: "upload", value: upload.uploadId)]

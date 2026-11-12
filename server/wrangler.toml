@@ -23,3 +23,9 @@ database_id = "00000000-0000-0000-0000-000000000000"
 
 # Secret, set with `npx wrangler secret put UPLOAD_TOKEN` (and in .dev.vars
 # for local development). Never put it in this file.
+
+# The fallback link-preview card is bundled as binary data.
+[[rules]]
+type = "Data"
+globs = ["**/*.png"]
+fallthrough = false
