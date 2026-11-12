@@ -27,11 +27,10 @@ if let flag = CommandLine.arguments.firstIndex(of: "--transcribe"), flag + 1 < C
 
 // `Tape --export <video> <out.mp4>` renders a recording with its saved edits
 // and burned-in captions, the same as the Export button.
-// `Tape --studio <video> [clean|studio]` makes the Studio Sound audio and
-// prints where it went.
+// `Tape --studio <video>` makes the Studio Sound audio and prints where it went.
 if let flag = CommandLine.arguments.firstIndex(of: "--studio"), flag + 1 < CommandLine.arguments.count {
     let source = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
-    let mode = CommandLine.arguments.dropFirst(flag + 2).first.flatMap(StudioSound.Mode.init) ?? .studio
+    let mode = StudioSound.Mode.studio
     let done = DispatchSemaphore(value: 0)
     Task.detached {
         let start = Date()

@@ -4,27 +4,22 @@ import AudioToolbox
 /// Cleans up the voice, all on this Mac with audio units built into macOS
 /// (nothing added to the app's size).
 ///
-/// - **Clean:** Apple's voice isolation (the model behind FaceTime's Voice
-///   Isolation) removes keyboard clicks, background noise and room echo,
-///   then the voice is brought to podcast loudness.
-/// - **Studio:** the same, plus a broadcast "podcast" tone: chest warmth,
-///   a touch of body, a small dip for clarity, air on top, and gentle 1.7:1
-///   compression. The settings are CrispVoice's (MIT), which were tuned in
-///   blind tests against a commercial enhancer.
+/// 1. Apple's voice isolation (the model behind FaceTime's Voice Isolation)
+///    removes keyboard clicks, background noise and room echo.
+/// 2. A broadcast "podcast" tone: chest warmth, a touch of body, a small dip
+///    for clarity, air on top, and gentle 1.7:1 compression. The settings
+///    are CrispVoice's (MIT), tuned in blind tests against a commercial
+///    enhancer.
+/// 3. Podcast loudness (-19 LUFS), with peaks kept under -1.5 dB.
 ///
 /// The result is cached next to the recording and swapped in for the
 /// original audio at playback, export and sharing. The video file itself
 /// is never changed.
 enum StudioSound {
+    /// Only Studio for now; "clean" (isolation without the tone) was tried
+    /// and dropped, and older edits that chose it get Studio.
     enum Mode: String, Codable, CaseIterable {
-        case clean, studio
-
-        var title: String {
-            switch self {
-            case .clean: "Clean"
-            case .studio: "Studio"
-            }
-        }
+        case studio
     }
 
     static let sampleRate = 48_000.0
@@ -40,7 +35,7 @@ enum StudioSound {
     /// those of the earlier Studio Sound (removed in 0.4).
     static func cacheFiles(for video: URL) -> [URL] {
         Mode.allCases.map { cacheURL(for: video, mode: $0) }
-            + ["studio.m4a", "studio2.m4a"].map { video.deletingPathExtension().appendingPathExtension($0) }
+            + ["clean-sound.m4a", "studio.m4a", "studio2.m4a"].map { video.deletingPathExtension().appendingPathExtension($0) }
     }
 
     /// The processed audio, if it was already made.
@@ -59,15 +54,11 @@ enum StudioSound {
         let task = Task.detached(priority: .userInitiated) {
             var samples = try await readMono(video)
             progress(0.15)
-            var effects: [AVAudioUnit] = [isolation()]
-            if mode == .studio { effects.append(tone()) }
-            samples = try process(samples, through: effects) { progress(0.15 + $0 * 0.7) }
-            if mode == .studio {
-                // Compress at a known level, so quiet and loud recordings get
-                // the same amount of it.
-                apply(gainDB: Float(-24 - loudness(samples)), to: &samples)
-                compress(&samples, thresholdDB: -20, ratio: 1.7, attack: 0.012, release: 0.22)
-            }
+            samples = try process(samples, through: [isolation(), tone()]) { progress(0.15 + $0 * 0.7) }
+            // Compress at a known level, so quiet and loud recordings get the
+            // same amount of it.
+            apply(gainDB: Float(-24 - loudness(samples)), to: &samples)
+            compress(&samples, thresholdDB: -20, ratio: 1.7, attack: 0.012, release: 0.22)
             apply(gainDB: Float(targetLoudness - loudness(samples)), to: &samples)
             limit(&samples)
             let partial = output.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).m4a")

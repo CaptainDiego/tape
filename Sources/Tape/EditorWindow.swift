@@ -23,8 +23,8 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
     private let spinner = NSProgressIndicator()
     private let actionButton = NSButton(title: "", target: nil, action: nil)
     private let captionsToggle = NSButton(checkboxWithTitle: "Captions", target: nil, action: nil)
-    /// Original, Clean or Studio sound (see StudioSound).
-    private let soundMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// Studio Sound on or off (see StudioSound).
+    private let soundToggle = NSButton(checkboxWithTitle: "Studio Sound", target: nil, action: nil)
     /// The processed audio for the chosen sound, once it's made.
     private var soundAudio: (mode: StudioSound.Mode, asset: AVURLAsset)?
     private var processingSound: StudioSound.Mode?
@@ -211,13 +211,11 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
 
         shareButton.toolTip = "Upload to your own share page and copy the link. Recordings stay on this Mac otherwise."
         trashButton.toolTip = "Move this recording, its transcript and edits to the Trash."
-        soundMenu.addItems(withTitles: ["Original Sound"] + StudioSound.Mode.allCases.map { "\($0.title) Sound" })
-        soundMenu.controlSize = .small
-        soundMenu.target = self
-        soundMenu.action = #selector(soundChosen)
-        soundMenu.toolTip = "Clean removes keyboard clicks, background noise and echo, and evens out the volume. "
-            + "Studio also adds a warm podcast tone. Runs on this Mac; the original recording isn't changed."
-        let header = NSStackView(views: [title, NSView(), soundMenu, captionsToggle, shareButton, exportButton, trashButton])
+        soundToggle.target = self
+        soundToggle.action = #selector(soundChosen)
+        soundToggle.toolTip = "Removes keyboard clicks, background noise and echo, and gives your voice a warm podcast "
+            + "tone at podcast loudness. Runs on this Mac; the original recording isn't changed."
+        let header = NSStackView(views: [title, NSView(), soundToggle, captionsToggle, shareButton, exportButton, trashButton])
         rewriteButton.toolTip = "Change the text of the selected words in the captions. The video isn't changed."
         let tools = NSStackView(views: [rewriteButton, fillersButton, undoButton, restoreButton])
         let editHint = Self.hint("Select words (double-click selects one), then type to rewrite them in the captions, or press "
@@ -383,8 +381,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
 
     @objc private func soundChosen() {
         var new = edits
-        let index = soundMenu.indexOfSelectedItem
-        new.sound = index > 0 ? StudioSound.Mode.allCases[index - 1] : nil
+        new.sound = soundToggle.state == .on ? .studio : nil
         apply(new)
     }
 
@@ -404,20 +401,20 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
     private func prepareSound(_ mode: StudioSound.Mode) {
         guard processingSound == nil else { return }
         processingSound = mode
-        setStatus("Making \(mode.title) Sound…", busy: true)
+        setStatus("Making Studio Sound…", busy: true)
         let file = self.file
         Task {
             do {
                 let url = try await StudioSound.render(file, mode: mode) { fraction in
                     Task { @MainActor [weak self] in
                         guard let self, self.processingSound == mode else { return }
-                        self.setStatus("Making \(mode.title) Sound \(Int(fraction * 100))%…", busy: true)
+                        self.setStatus("Making Studio Sound \(Int(fraction * 100))%…", busy: true)
                     }
                 }
                 soundAudio = (mode, AVURLAsset(url: url))
                 setStatus(nil, busy: false)
             } catch {
-                setStatus("\(mode.title) Sound failed: \(error.localizedDescription)", busy: false,
+                setStatus("Studio Sound failed: \(error.localizedDescription)", busy: false,
                           action: ("Try Again", { [weak self] in self?.prepareSound(mode) }))
             }
             processingSound = nil
@@ -684,7 +681,7 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSText
         trimBar.trimEnd = edits.trimEnd ?? duration
         trimBar.cuts = timeline.middleCuts
         trimBar.speeds = edits.speeds
-        soundMenu.selectItem(at: edits.sound.flatMap { StudioSound.Mode.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        soundToggle.state = edits.sound == nil ? .off : .on
         let audio = currentSoundAudio()
         renderTranscript()
         updateButtons()

@@ -56,7 +56,8 @@ struct Edits: Codable, Equatable {
         cuts = try c.decodeIfPresent([Cut].self, forKey: .cuts) ?? []
         corrections = try c.decodeIfPresent([Int: String].self, forKey: .corrections) ?? [:]
         speeds = try c.decodeIfPresent([Speed].self, forKey: .speeds) ?? []
-        sound = (try? c.decodeIfPresent(String.self, forKey: .sound)).flatMap { $0 }.flatMap(StudioSound.Mode.init)
+        // Any saved choice ("clean" from before, or "studio") means Studio Sound.
+        sound = (try? c.decodeIfPresent(String.self, forKey: .sound)).flatMap { $0 }.map { _ in .studio }
     }
 
     /// True if the word is cut from the video, by deleting it in the
