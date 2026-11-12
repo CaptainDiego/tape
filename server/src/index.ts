@@ -372,7 +372,7 @@ footer { grid-column:1/-1; color:var(--muted); font-size:12px; }
 .controls .label { color:var(--muted); font-size:12px; margin-right:2px; }
 .controls button { font:inherit; font-size:12px; color:var(--fg); background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:3px 9px; cursor:pointer; font-variant-numeric:tabular-nums; }
 .controls button:hover { border-color:var(--accent); }
-#speeds button[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
+#speeds button[aria-pressed="true"], #cc[aria-pressed="true"] { background:var(--accent); border-color:var(--accent); color:#fff; }
 .controls .spacer { flex:1; }
 main.no-transcript { grid-template-columns:minmax(0,1fr); max-width:1100px; }
 main.no-transcript aside { display:none; }
@@ -394,6 +394,7 @@ main.no-transcript aside { display:none; }
       <span class="label">Speed</span>
       <span id="speeds"></span>
       <span class="spacer"></span>
+      <button id="cc" type="button" aria-pressed="true">Captions</button>
       <button id="toggle" type="button" aria-pressed="true">Transcript</button>
     </div>
   </section>
@@ -501,6 +502,28 @@ main.no-transcript aside { display:none; }
   };
   showTranscript(store.get("tape-transcript") !== "0");
   toggle.addEventListener("click", () => showTranscript(main.classList.contains("no-transcript")));
+
+  // Captions on the video, on by default; the choice is remembered. The
+  // browser's own CC menu keeps working and this button follows it.
+  const cc = document.getElementById("cc");
+  const track = video.textTracks[0];
+  const showCaptions = (show) => {
+    if (track) track.mode = show ? "showing" : "hidden";
+    cc.setAttribute("aria-pressed", String(show));
+    cc.textContent = show ? "Captions On" : "Captions Off";
+    store.set("tape-captions", show ? "1" : "0");
+  };
+  if (track) {
+    showCaptions(store.get("tape-captions") !== "0");
+    cc.addEventListener("click", () => showCaptions(track.mode !== "showing"));
+    video.textTracks.addEventListener("change", () => {
+      const on = track.mode === "showing";
+      cc.setAttribute("aria-pressed", String(on));
+      cc.textContent = on ? "Captions On" : "Captions Off";
+    });
+  } else {
+    cc.hidden = true;
+  }
 
   document.getElementById("copy").addEventListener("click", async (e) => {
     try {
