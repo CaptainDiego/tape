@@ -111,6 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// `open -a Tape <video>` (or dropping a video on the app) opens it in the editor.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased()) {
+            EditorWindow.open(url)
+        }
+    }
+
     // MARK: Status item
 
     /// While recording, one click on the menu bar icon stops (like Loom).

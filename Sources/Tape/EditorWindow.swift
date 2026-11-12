@@ -8,7 +8,7 @@ import AppKit
 /// Editing is non-destructive. Deleting words or dragging the trim handles
 /// only changes the saved `Edits`; playback and export skip the cut parts.
 @MainActor
-final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
+final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate, NSTextFieldDelegate, NSPopoverDelegate {
     private static var openEditors: [EditorWindow] = []
 
     private let file: URL
@@ -36,7 +36,9 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     private let speedMenu = NSPopUpButton(frame: .zero, pullsDown: false)
     private static let rates: [Double] = [1, 1.25, 1.5, 1.75, 2, 2.5, 3]
     private var editPopover: NSPopover?
+    private var editField: NSTextField?
     private var editingWords: [Int] = []
+    private var editCancelled = false
 
     private var transcript: Transcript?
     private var segments: [Range<Int>] = []
@@ -486,20 +488,30 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     }
 
     private func editWords(_ indices: [Int], typing: String? = nil) {
-        guard let words = transcript?.words, let first = indices.min(), let last = indices.max() else { return }
+        // Letters typed while the box is still opening belong in it, not in a
+        // new box (that used to keep only the first letter).
+        if let typing, let field = editField {
+            field.stringValue += typing
+            Self.placeCaretAtEnd(field)
+            return
+        }
+        guard editField == nil else { return }  // already rewriting
+        guard let words = transcript?.words, let first = indices.min(), var last = indices.max() else { return }
+        // A rewrite folds the words after the first into it (they read "").
+        // Take them along, so rewriting the phrase again covers all of it.
+        while last + 1 < words.count, edits.corrections[last + 1] == "", !edits.isRemoved(last + 1, in: words) { last += 1 }
         let visible = (first...last).filter { wordRanges[$0] != nil }
         guard let firstVisible = visible.first, let lastVisible = visible.last,
               let layout = transcriptView.layoutManager, let container = transcriptView.textContainer
         else { return }
-        editPopover?.close()
-        editingWords = visible
+        editingWords = (firstVisible...last).filter { !edits.isRemoved($0, in: words) }
 
         // Typing over a selection starts with what was typed, like in any
         // text editor; Rewrite… starts with the current words.
-        let field = NSTextField(string: typing ?? visible.map { edits.text(of: $0, in: words) }.joined(separator: " "))
+        let current = visible.map { edits.text(of: $0, in: words) }.joined(separator: " ")
+        let field = NSTextField(string: typing ?? current)
         field.frame = NSRect(x: 12, y: 12, width: 320, height: 24)
-        field.target = self
-        field.action = #selector(commitWordEdit(_:))
+        field.delegate = self
         let label = NSTextField(labelWithString: "Rewrite in the captions. Return to save, Esc to cancel.")
         label.font = .systemFont(ofSize: 11)
         label.textColor = .secondaryLabelColor
@@ -512,7 +524,10 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = controller
+        popover.delegate = self
         editPopover = popover
+        editField = field
+        editCancelled = false
 
         let range = NSUnionRange(wordRanges[firstVisible]!, wordRanges[lastVisible]!)
         var rect = layout.boundingRect(forGlyphRange: layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil),
@@ -520,20 +535,51 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         rect.origin.x += transcriptView.textContainerOrigin.x
         rect.origin.y += transcriptView.textContainerOrigin.y
         popover.show(relativeTo: rect, of: transcriptView, preferredEdge: .maxY)
-        popover.contentViewController?.view.window?.makeFirstResponder(field)
-        if typing != nil {  // keep typing after the first letter
-            let end = (field.stringValue as NSString).length
-            field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)
+        let focus = { [weak field] in
+            guard let field, let window = field.window else { return }
+            window.makeKey()
+            if window.firstResponder !== field.currentEditor() { window.makeFirstResponder(field) }
+            if typing != nil { Self.placeCaretAtEnd(field) }  // keep typing after the first letter
         }
+        focus()
+        // The popover's window only becomes key a moment later.
+        DispatchQueue.main.async(execute: focus)
     }
 
-    @objc private func commitWordEdit(_ sender: NSTextField) {
+    private static func placeCaretAtEnd(_ field: NSTextField) {
+        let end = (field.stringValue as NSString).length
+        field.currentEditor()?.selectedRange = NSRange(location: end, length: 0)
+    }
+
+    /// Return saves and Esc cancels; clicking elsewhere also saves.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === editField else { return false }
+        if selector == #selector(NSResponder.insertNewline(_:)) {
+            editPopover?.close()
+            return true
+        }
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
+            editCancelled = true
+            editPopover?.close()
+            return true
+        }
+        return false
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        guard let popover = notification.object as? NSPopover, popover === editPopover else { return }
+        let field = editField
+        editPopover = nil
+        editField = nil
+        if let field, !editCancelled { commitWordEdit(field.stringValue) }
+        editingWords = []
+        window.makeFirstResponder(transcriptView)
+    }
+
+    private func commitWordEdit(_ typed: String) {
         guard let words = transcript?.words, let first = editingWords.first else { return }
         let indices = editingWords
-        editingWords = []
-        editPopover?.close()
-        editPopover = nil
-        let text = sender.stringValue.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let text = typed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         var new = edits
         if text.isEmpty {
             new.deletedWords.formUnion(indices)
@@ -546,7 +592,6 @@ final class EditorWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
             }
         }
         apply(new)
-        window.makeFirstResponder(transcriptView)
     }
 
     @objc func undoClicked() { undo() }
