@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Tape"
 BUNDLE_ID="com.diego.tape"
-VERSION="0.4.0"
+VERSION="0.5.0"
 APP="$ROOT/dist/$APP_NAME.app"
 
 echo "==> Building release binary"
